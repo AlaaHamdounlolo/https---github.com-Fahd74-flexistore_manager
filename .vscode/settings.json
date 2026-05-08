@@ -1,0 +1,6 @@
+{
+  "cmake.sourceDirectory": "C:/Users/ASUS/StudioProjects/flexistore_manager/backend_cpp",
+  "cmake.configureArgs": [
+    "-DMYSQL_ROOT=C:/Program Files/MySQL/MySQL Connector C++ 9.7"
+  ]
+}

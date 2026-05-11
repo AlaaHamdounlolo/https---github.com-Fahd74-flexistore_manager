@@ -287,6 +287,219 @@ FLEXISTORE_EXPORT int pos_process_sale(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// pos_process_return — atomic return transaction
+// ═══════════════════════════════════════════════════════════════════════════════
+
+FLEXISTORE_EXPORT int pos_process_return(
+    int user_id,
+    int original_invoice_id,
+    const char* items_json
+) {
+    std::lock_guard<std::mutex> lock(pos_mutex);
+
+    if (original_invoice_id <= 0) return FFI_ERROR_INVALID_INPUT;
+
+    auto& pool = flexistore::DBConnectionPool::getInstance();
+    ConnGuard guard{pool, pool.getConnection()};
+    if (!guard.c) return FFI_ERROR_DB_CONNECTION;
+
+    sql::Connection* conn = guard.c.get();
+
+    try {
+        // ── BEGIN TRANSACTION ─────────────────────────────────────────────
+        conn->setAutoCommit(false);
+
+        // ── Step 1: Verify original invoice exists and is not a return ─────
+        unique_ptr<sql::PreparedStatement> inv_check(conn->prepareStatement(
+            "SELECT id, client_id, user_id, payment_type, "
+            "       CAST(net_amount AS CHAR) AS net_amount "
+            "FROM invoices WHERE id = ? FOR UPDATE"
+        ));
+        inv_check->setInt(1, original_invoice_id);
+        unique_ptr<sql::ResultSet> inv_rs(inv_check->executeQuery());
+
+        if (!inv_rs->next()) {
+            conn->rollback();
+            conn->setAutoCommit(true);
+            return FFI_ERROR_RET_INVOICE_NOT_FOUND;
+        }
+
+        string orig_payment_type = inv_rs->getString("payment_type");
+        if (orig_payment_type == "return") {
+            conn->rollback();
+            conn->setAutoCommit(true);
+            return FFI_ERROR_RET_ALREADY_RETURNED;
+        }
+
+        int orig_client_id = inv_rs->getInt("client_id");
+        bool client_is_null = inv_rs->wasNull();
+
+        string net_str = inv_rs->getString("net_amount");
+        double orig_net = 0.0;
+        try { orig_net = std::stod(net_str); } catch (...) {}
+
+        // ── Step 2: Fetch original invoice items ──────────────────────────
+        unique_ptr<sql::PreparedStatement> items_fetch(conn->prepareStatement(
+            "SELECT product_id, quantity, "
+            "       CAST(unit_price AS CHAR) AS unit_price "
+            "FROM invoice_items WHERE invoice_id = ?"
+        ));
+        items_fetch->setInt(1, original_invoice_id);
+        unique_ptr<sql::ResultSet> items_rs(items_fetch->executeQuery());
+
+        // Build list of original items
+        struct OrigItem {
+            int product_id;
+            int quantity;
+            double unit_price;
+        };
+        vector<OrigItem> orig_items;
+        while (items_rs->next()) {
+            OrigItem oi;
+            oi.product_id = items_rs->getInt("product_id");
+            oi.quantity = items_rs->getInt("quantity");
+            string price_s = items_rs->getString("unit_price");
+            try { oi.unit_price = std::stod(price_s); } catch (...) { oi.unit_price = 0.0; }
+            orig_items.push_back(oi);
+        }
+
+        if (orig_items.empty()) {
+            conn->rollback();
+            conn->setAutoCommit(true);
+            return FFI_ERROR_RET_INVOICE_NOT_FOUND;
+        }
+
+        // ── Step 3: Determine which items to return ───────────────────────
+        // If items_json is provided, use those quantities (partial return).
+        // Otherwise, return all original items (full return).
+        vector<CartItemData> return_items;
+
+        if (items_json && strlen(items_json) > 2) {
+            auto requested = parse_items_json(items_json);
+
+            // Validate each requested return item against original
+            for (auto& req : requested) {
+                bool found = false;
+                for (auto& oi : orig_items) {
+                    if (oi.product_id == req.product_id) {
+                        if (req.quantity > oi.quantity) {
+                            conn->rollback();
+                            conn->setAutoCommit(true);
+                            return FFI_ERROR_RET_INVALID_QUANTITY;
+                        }
+                        CartItemData ci;
+                        ci.product_id = oi.product_id;
+                        ci.quantity = req.quantity;
+                        ci.unit_price = oi.unit_price;
+                        return_items.push_back(ci);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    conn->rollback();
+                    conn->setAutoCommit(true);
+                    return FFI_ERROR_RET_INVOICE_NOT_FOUND;
+                }
+            }
+        } else {
+            // Full return — all original items
+            for (auto& oi : orig_items) {
+                CartItemData ci;
+                ci.product_id = oi.product_id;
+                ci.quantity = oi.quantity;
+                ci.unit_price = oi.unit_price;
+                return_items.push_back(ci);
+            }
+        }
+
+        if (return_items.empty()) {
+            conn->rollback();
+            conn->setAutoCommit(true);
+            return FFI_ERROR_POS_EMPTY_CART;
+        }
+
+        // ── Step 4: Calculate return total ─────────────────────────────────
+        double return_total = 0.0;
+        for (auto& ri : return_items) {
+            return_total += ri.unit_price * ri.quantity;
+        }
+
+        // ── Step 5: Create the return invoice ─────────────────────────────
+        unique_ptr<sql::PreparedStatement> ret_inv(conn->prepareStatement(
+            "INSERT INTO invoices (client_id, user_id, total_amount, net_amount, payment_type) "
+            "VALUES (?, ?, ?, ?, 'return')"
+        ));
+
+        if (!client_is_null && orig_client_id > 0) {
+            ret_inv->setInt(1, orig_client_id);
+        } else {
+            ret_inv->setNull(1, sql::DataType::INTEGER);
+        }
+        ret_inv->setInt(2, user_id);
+        ret_inv->setDouble(3, -return_total); // negative total for returns
+        ret_inv->setDouble(4, -return_total);
+        ret_inv->executeUpdate();
+
+        // Get return invoice_id
+        unique_ptr<sql::Statement> id_stmt(conn->createStatement());
+        unique_ptr<sql::ResultSet> id_rs(id_stmt->executeQuery("SELECT LAST_INSERT_ID() AS id"));
+        int return_invoice_id = 0;
+        if (id_rs->next()) {
+            return_invoice_id = id_rs->getInt("id");
+        }
+        if (return_invoice_id <= 0) {
+            conn->rollback();
+            conn->setAutoCommit(true);
+            return FFI_ERROR_POS_INVOICE_FAILED;
+        }
+
+        // ── Step 6: Insert return invoice_items + restock ─────────────────
+        for (auto& ri : return_items) {
+            // Insert return item row
+            unique_ptr<sql::PreparedStatement> item_stmt(conn->prepareStatement(
+                "INSERT INTO invoice_items (invoice_id, product_id, quantity, unit_price) "
+                "VALUES (?, ?, ?, ?)"
+            ));
+            item_stmt->setInt(1, return_invoice_id);
+            item_stmt->setInt(2, ri.product_id);
+            item_stmt->setInt(3, ri.quantity);
+            item_stmt->setDouble(4, ri.unit_price);
+            item_stmt->executeUpdate();
+
+            // Restock: add quantity back using Team 2's stock_manager (+qty)
+            int stock_result = flexistore::restock_product(
+                ri.product_id, ri.quantity, user_id, conn
+            );
+            if (stock_result != FFI_SUCCESS) {
+                conn->rollback();
+                conn->setAutoCommit(true);
+                return stock_result;
+            }
+        }
+
+        // ── Step 7: COMMIT ────────────────────────────────────────────────
+        conn->commit();
+        conn->setAutoCommit(true);
+
+        // ── Step 8: Audit logging (outside transaction — non-critical) ────
+        log_transaction(user_id, "POS_RETURN", return_total);
+
+        // Return the return_invoice_id as success code (always > 0)
+        return return_invoice_id;
+
+    } catch (sql::SQLException& e) {
+        std::cerr << "[POS] SQLException in pos_process_return: " << e.what() << std::endl;
+        try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
+        return FFI_ERROR_DB_QUERY;
+    } catch (std::exception& e) {
+        std::cerr << "[POS] Exception in pos_process_return: " << e.what() << std::endl;
+        try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
+        return FFI_ERROR_UNKNOWN;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // pos_get_invoice — retrieve invoice + items as JSON
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -344,7 +557,7 @@ FLEXISTORE_EXPORT const char* pos_get_invoice(int invoice_id) {
 
         // ── Fetch invoice items ───────────────────────────────────────────
         unique_ptr<sql::PreparedStatement> items_stmt(conn->prepareStatement(
-            "SELECT p.name AS product_name, ii.quantity, "
+            "SELECT ii.product_id, p.name AS product_name, ii.quantity, "
             "       CAST(ii.unit_price AS CHAR) AS unit_price "
             "FROM invoice_items ii "
             "JOIN products p ON ii.product_id = p.id "
@@ -357,6 +570,7 @@ FLEXISTORE_EXPORT const char* pos_get_invoice(int invoice_id) {
         builder.start_array("items");
         while (items_rs->next()) {
             builder.start_object();
+            builder.add_int("product_id", items_rs->getInt("product_id"));
             builder.add_string("product_name", items_rs->getString("product_name"));
             builder.add_int("quantity", items_rs->getInt("quantity"));
 

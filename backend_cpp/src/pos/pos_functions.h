@@ -8,13 +8,17 @@
  *
  * FFI exports for the Point-of-Sale transaction engine.
  *
- * Transaction flow:
+ * Sale flow:
  *   1. pos_validate_stock()   — Pre-flight check (optional, UI-side guard)
  *   2. pos_process_sale()     — Atomic sale: validate → invoice → deduct → audit
  *   3. pos_get_invoice()      — Retrieve invoice + items as JSON for preview/PDF
  *
+ * Return flow:
+ *   1. pos_process_return()   — Atomic return: validate → return invoice → restock → audit
+ *
  * Return codes:
- *   pos_process_sale() returns invoice_id (>0) on success, or FFI_ERROR_POS_*
+ *   pos_process_sale()   returns invoice_id (>0) on success, or FFI_ERROR_POS_*
+ *   pos_process_return() returns return_invoice_id (>0) on success, or FFI_ERROR_RET_*
  ******************************************************************************/
 
 extern "C" {
@@ -59,6 +63,30 @@ extern "C" {
     );
 
     /**
+     * Processes a return against an original invoice.
+     *
+     * Steps (all-or-nothing within a DB transaction):
+     *   1. Verify original invoice exists and is not a return itself
+     *   2. Fetch original invoice items and validate return quantities
+     *   3. Create a new "return" invoice with negative amounts
+     *   4. Insert return invoice_items (mirroring original items)
+     *   5. Restock each returned product (+qty via stock_manager)
+     *   6. Log inventory changes + transaction via audit_logger
+     *   7. COMMIT
+     *
+     * @param user_id           The cashier processing the return.
+     * @param original_invoice_id  The ID of the original sale invoice.
+     * @param items_json        JSON array: [{"product_id":1,"quantity":1}, ...]
+     *                          If NULL or empty, all original items are returned.
+     * @return return_invoice_id (>0) on success, or a negative FFI error code.
+     */
+    FLEXISTORE_EXPORT int pos_process_return(
+        int user_id,
+        int original_invoice_id,
+        const char* items_json
+    );
+
+    /**
      * Retrieves a single invoice with its items as a JSON object.
      *
      * Returned JSON:
@@ -71,7 +99,7 @@ extern "C" {
      *   "payment_type": "cash",
      *   "created_at": "2026-05-11 12:00:00",
      *   "items": [
-     *     {"product_name":"iPhone Case","quantity":2,"unit_price":25.00,"line_total":50.00},
+     *     {"product_id":5,"product_name":"iPhone Case","quantity":2,"unit_price":25.00,"line_total":50.00},
      *     ...
      *   ]
      * }

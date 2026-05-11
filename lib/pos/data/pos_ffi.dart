@@ -28,6 +28,17 @@ typedef _PosProcessSaleDart = int Function(
   Pointer<Utf8> paymentType,
 );
 
+typedef _PosProcessReturnC = Int32 Function(
+  Int32 userId,
+  Int32 originalInvoiceId,
+  Pointer<Utf8> itemsJson,
+);
+typedef _PosProcessReturnDart = int Function(
+  int userId,
+  int originalInvoiceId,
+  Pointer<Utf8> itemsJson,
+);
+
 typedef _PosGetInvoiceC = Pointer<Utf8> Function(Int32 invoiceId);
 typedef _PosGetInvoiceDart = Pointer<Utf8> Function(int invoiceId);
 
@@ -36,12 +47,14 @@ typedef _PosGetInvoiceDart = Pointer<Utf8> Function(int invoiceId);
 /// Provides:
 ///  • [validateStock] — Pre-flight stock check
 ///  • [processSale] — Atomic sale (invoice + deduction + audit)
+///  • [processReturn] — Atomic return (restock + return invoice + audit)
 ///  • [getInvoice] — Retrieve invoice JSON by ID
 class PosFFI {
   static final PosFFI instance = PosFFI._internal();
 
   late final _PosValidateStockDart _validateStock;
   late final _PosProcessSaleDart _processSale;
+  late final _PosProcessReturnDart _processReturn;
   late final _PosGetInvoiceDart _getInvoice;
 
   PosFFI._internal() {
@@ -56,6 +69,9 @@ class PosFFI {
     );
     _processSale = lib.lookupFunction<_PosProcessSaleC, _PosProcessSaleDart>(
       'pos_process_sale',
+    );
+    _processReturn = lib.lookupFunction<_PosProcessReturnC, _PosProcessReturnDart>(
+      'pos_process_return',
     );
     _getInvoice = lib.lookupFunction<_PosGetInvoiceC, _PosGetInvoiceDart>(
       'pos_get_invoice',
@@ -95,6 +111,30 @@ class PosFFI {
     } finally {
       calloc.free(pItems);
       calloc.free(pType);
+    }
+  }
+
+  /// Processes a return against an original invoice via the C++ backend.
+  ///
+  /// [originalInvoiceId] — the ID of the original sale invoice.
+  /// [returnItems] — optional list of specific items/quantities to return.
+  ///                 If null or empty, all original items are returned (full return).
+  ///
+  /// Returns the return_invoice_id (>0) on success, or a negative error code.
+  int processReturn({
+    required int userId,
+    required int originalInvoiceId,
+    List<Map<String, dynamic>>? returnItems,
+  }) {
+    final itemsJson = returnItems != null && returnItems.isNotEmpty
+        ? jsonEncode(returnItems)
+        : '[]';
+    final pItems = toNativeUtf8(itemsJson);
+
+    try {
+      return _processReturn(userId, originalInvoiceId, pItems);
+    } finally {
+      calloc.free(pItems);
     }
   }
 

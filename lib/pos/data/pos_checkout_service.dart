@@ -1,30 +1,28 @@
 import 'dart:convert';
 
-import '../../audit/data/audit_ffi.dart';
 import '../../auth/data/session_ffi.dart';
 import '../../clients/data/clients_ffi.dart';
 import '../../clients/screens/clients_screen.dart';
 import '../../installments/data/installments_ffi.dart';
 import 'cart_controller.dart';
 import 'cart_model.dart';
+import 'pos_ffi.dart';
 
 /// Orchestrates the checkout flow for both Cash and Installment sales.
 ///
-/// Responsibilities:
-///  1. Validate stock one final time
-///  2. Log each item via Team 7's [AuditNativeAPI.logInventoryChange]
-///  3. Log the overall transaction via [AuditNativeAPI.logTransaction]
-///  4. If installment: create plan via Faris's [InstallmentsFFI]
-///  5. Clear the cart on success
+/// Delegates the heavy transactional work to the C++ backend via [PosFFI]:
+///  1. Atomic stock validation + invoice creation + stock deduction + audit
+///  2. Installment plan creation via [InstallmentsFFI]
+///  3. Cart reset on success
 class PosCheckoutService {
   PosCheckoutService._();
 
-  /// Processes a cash sale.
+  /// Processes a cash sale via the C++ backend.
   ///
-  /// Returns a [CheckoutResult] with success/failure info.
+  /// Returns a [CheckoutResult] with the invoice_id on success.
   static CheckoutResult processCashSale() {
     final ctrl = CartController.instance;
-    final items = List<CartItem>.from(ctrl.cartItems); // snapshot before clear
+    final items = List<CartItem>.from(ctrl.cartItems);
     if (items.isEmpty) {
       return CheckoutResult(success: false, message: 'السلة فارغة');
     }
@@ -34,15 +32,31 @@ class PosCheckoutService {
     final discount = ctrl.discount;
     final grandTotal = ctrl.grandTotal;
 
-    // ── Team 7 Audit Hooks ────────────────────────────────────────────────
-    _logSaleToAudit(items, userId, 'POS_CASH_SALE', grandTotal);
+    // ── C++ atomic sale ───────────────────────────────────────────────────
+    final invoiceId = PosFFI.instance.processSale(
+      userId: userId,
+      clientId: 0, // Guest
+      items: items,
+      totalAmount: subtotal,
+      netAmount: grandTotal,
+      paymentType: 'cash',
+    );
 
-    // ── Clear cart ────────────────────────────────────────────────────────
+    if (invoiceId <= 0) {
+      return CheckoutResult(
+        success: false,
+        message: _errorMessage(invoiceId),
+      );
+    }
+
+    // ── Clear cart & refresh products ─────────────────────────────────────
     ctrl.clearCart();
+    ctrl.loadProducts(); // Refresh stock quantities from DB
 
     return CheckoutResult(
       success: true,
       message: 'تم البيع بنجاح (كاش)',
+      invoiceId: invoiceId,
       items: items,
       subtotal: subtotal,
       discount: discount,
@@ -52,15 +66,15 @@ class PosCheckoutService {
     );
   }
 
-  /// Processes an installment sale.
+  /// Processes an installment sale via the C++ backend.
   ///
-  /// Requires a selected [client] and [months] for the payment plan.
+  /// Creates the invoice first, then links an installment plan to it.
   static CheckoutResult processInstallmentSale({
     required Client client,
     required int months,
   }) {
     final ctrl = CartController.instance;
-    final items = List<CartItem>.from(ctrl.cartItems); // snapshot before clear
+    final items = List<CartItem>.from(ctrl.cartItems);
     if (items.isEmpty) {
       return CheckoutResult(success: false, message: 'السلة فارغة');
     }
@@ -70,9 +84,28 @@ class PosCheckoutService {
     final discount = ctrl.discount;
     final grandTotal = ctrl.grandTotal;
 
-    // ── Faris: Create installment plan ─────────────────────────────────────
-    final installResult = InstallmentsFFI.instance.createInstallmentPlan(
+    // ── C++ atomic sale ───────────────────────────────────────────────────
+    final invoiceId = PosFFI.instance.processSale(
+      userId: userId,
       clientId: client.id,
+      items: items,
+      totalAmount: subtotal,
+      netAmount: grandTotal,
+      paymentType: 'installment',
+    );
+
+    if (invoiceId <= 0) {
+      return CheckoutResult(
+        success: false,
+        message: _errorMessage(invoiceId),
+      );
+    }
+
+    // ── Create installment plan via C++ ───────────────────────────────────
+    final installResult = InstallmentsFFI.instance.createInstallmentPlan(
+      userId: userId,
+      clientId: client.id,
+      invoiceId: invoiceId,
       totalAmount: grandTotal,
       months: months,
     );
@@ -84,11 +117,9 @@ class PosCheckoutService {
       );
     }
 
-    // ── Team 7 Audit Hooks ────────────────────────────────────────────────
-    _logSaleToAudit(items, userId, 'POS_INSTALLMENT_SALE', grandTotal);
-
-    // ── Clear cart ────────────────────────────────────────────────────────
+    // ── Clear cart & refresh products ─────────────────────────────────────
     ctrl.clearCart();
+    ctrl.loadProducts(); // Refresh stock quantities from DB
 
     final monthly = InstallmentsFFI.instance
         .calculateMonthlyPayment(grandTotal, months);
@@ -96,6 +127,7 @@ class PosCheckoutService {
     return CheckoutResult(
       success: true,
       message: 'تم البيع بالتقسيط — $months شهر × \$${monthly.toStringAsFixed(2)}',
+      invoiceId: invoiceId,
       items: items,
       subtotal: subtotal,
       discount: discount,
@@ -104,29 +136,6 @@ class PosCheckoutService {
       clientName: client.name,
       cashierName: SessionNativeAPI.instance.getCurrentUserName(),
     );
-  }
-
-  /// Internal: logs each cart item as an inventory change + the total transaction.
-  static void _logSaleToAudit(
-    List<CartItem> items,
-    int userId,
-    String actionType,
-    double totalAmount,
-  ) {
-    final audit = AuditNativeAPI.instance;
-
-    // Log each product's stock change
-    for (final ci in items) {
-      audit.logInventoryChange(
-        ci.product.id,
-        userId,
-        'SALE',
-        ci.quantity,
-      );
-    }
-
-    // Log the overall transaction
-    audit.logTransaction(userId, actionType, totalAmount);
   }
 
   /// Helper: loads all clients from the C++ backend.
@@ -144,6 +153,31 @@ class PosCheckoutService {
     }
     return [];
   }
+
+  /// Maps C++ FFI error codes to user-friendly Arabic messages.
+  static String _errorMessage(int code) {
+    switch (code) {
+      case -2:
+        return 'خطأ في الاتصال بقاعدة البيانات';
+      case -3:
+        return 'خطأ في تنفيذ العملية';
+      case -5:
+        return 'بيانات غير صالحة';
+      case -205:
+        return 'منتج غير موجود في المخزن';
+      case -206:
+      case -401:
+        return 'الكمية المطلوبة غير متوفرة في المخزن';
+      case -400:
+        return 'السلة فارغة';
+      case -402:
+        return 'عملية التقسيط تتطلب اختيار عميل';
+      case -403:
+        return 'فشل في إنشاء الفاتورة';
+      default:
+        return 'حدث خطأ غير متوقع (Code: $code)';
+    }
+  }
 }
 
 /// Holds the result of a checkout operation.
@@ -152,6 +186,7 @@ class PosCheckoutService {
 class CheckoutResult {
   final bool success;
   final String message;
+  final int? invoiceId;
   final List<CartItem>? items;
   final double? subtotal;
   final double? discount;
@@ -163,6 +198,7 @@ class CheckoutResult {
   CheckoutResult({
     required this.success,
     required this.message,
+    this.invoiceId,
     this.items,
     this.subtotal,
     this.discount,

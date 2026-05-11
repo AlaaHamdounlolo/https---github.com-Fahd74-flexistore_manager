@@ -41,7 +41,9 @@ class _InvoicePreviewDialog extends StatelessWidget {
     final now = DateTime.now();
     final dateStr =
         '${now.year}-${_pad(now.month)}-${_pad(now.day)}  ${_pad(now.hour)}:${_pad(now.minute)}';
-    final txnId = 'TXN-${now.millisecondsSinceEpoch.toString().substring(5)}';
+    final invoiceLabel = result.invoiceId != null
+        ? 'INV-${result.invoiceId}'
+        : 'TXN-${now.millisecondsSinceEpoch.toString().substring(5)}';
     final items = result.items ?? [];
 
     return Dialog(
@@ -64,7 +66,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     // Header
-                    _buildInvoiceHeader(dateStr, txnId),
+                    _buildInvoiceHeader(dateStr, invoiceLabel),
                     const SizedBox(height: 16),
 
                     // Parties row

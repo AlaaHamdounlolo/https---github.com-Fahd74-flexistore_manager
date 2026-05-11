@@ -1,49 +1,77 @@
-/// Stub for Faris's installment FFI bindings.
+import 'dart:ffi';
+
+import '../../core/native_bridge.dart';
+
+// ── Native FFI Signatures ────────────────────────────────────────────────────
+
+typedef _CreateInstallmentPlanC = Int32 Function(
+  Int32 userId,
+  Int32 clientId,
+  Int32 invoiceId,
+  Double totalAmount,
+  Int32 months,
+);
+typedef _CreateInstallmentPlanDart = int Function(
+  int userId,
+  int clientId,
+  int invoiceId,
+  double totalAmount,
+  int months,
+);
+
+/// Dart FFI bridge to the C++ installments backend.
 ///
-/// This class provides a pure-Dart fallback for installment calculations.
-/// When Faris's C++ backend is ready, replace the body of each method
-/// with the real FFI call — the public API stays the same.
+/// Provides:
+///  • [calculateMonthlyPayment] — Pure Dart math (no C++ round-trip needed)
+///  • [createInstallmentPlan] — Creates a plan via C++ with DB transaction
 class InstallmentsFFI {
   // ── Singleton ──────────────────────────────────────────────────────────────
   static final InstallmentsFFI instance = InstallmentsFFI._internal();
-  InstallmentsFFI._internal();
+
+  late final _CreateInstallmentPlanDart _createPlan;
+
+  InstallmentsFFI._internal() {
+    _bindFunctions();
+  }
+
+  void _bindFunctions() {
+    final lib = NativeBridge().lib;
+    _createPlan = lib.lookupFunction<
+      _CreateInstallmentPlanC,
+      _CreateInstallmentPlanDart
+    >('create_installment_plan');
+  }
 
   /// Available installment period options (months).
   static const List<int> availableMonths = [3, 6, 9, 12];
 
   /// Calculates the monthly payment for an installment plan.
   ///
-  /// [totalAmount] — the grand total of the sale.
-  /// [months] — the number of installment months.
-  ///
-  /// Returns the monthly payment amount (rounded to 2 decimals).
+  /// Pure Dart — no FFI call needed for simple division.
   double calculateMonthlyPayment(double totalAmount, int months) {
     if (months <= 0) return totalAmount;
     final monthly = totalAmount / months;
-    // Round to 2 decimal places
     return (monthly * 100).roundToDouble() / 100;
   }
 
-  /// Creates an installment plan linked to a client and invoice.
+  /// Creates an installment plan in the C++ backend.
   ///
-  /// [clientId] — the client who will pay in installments.
-  /// [totalAmount] — the full sale amount.
-  /// [months] — the payment period.
+  /// This inserts into the `installments` table and updates `clients.total_debt`.
   ///
-  /// Returns 0 on success, negative on error.
+  /// [userId] — The cashier performing the operation.
+  /// [clientId] — The client taking the installment.
+  /// [invoiceId] — The invoice this plan is linked to.
+  /// [totalAmount] — The full sale amount.
+  /// [months] — The number of monthly payments.
   ///
-  /// **TODO (Faris):** Replace this stub with the real FFI call:
-  /// ```dart
-  /// final result = _createInstallmentPlan(userId, clientId, invoiceId, totalAmount, months);
-  /// ```
+  /// Returns 0 (FFI_SUCCESS) on success, negative on error.
   int createInstallmentPlan({
+    required int userId,
     required int clientId,
+    required int invoiceId,
     required double totalAmount,
     required int months,
   }) {
-    // Stub: simulate success
-    // In production this will call:
-    //   _lib.lookupFunction<...>('create_installment_plan')(...)
-    return 0;
+    return _createPlan(userId, clientId, invoiceId, totalAmount, months);
   }
 }

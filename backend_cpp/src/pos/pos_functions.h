@@ -109,7 +109,7 @@ extern "C" {
      * @param invoice_id  The invoice to retrieve.
      * @return JSON string, or error JSON if not found.
      */
-    FLEXISTORE_EXPORT const char* pos_get_invoice(int invoice_id);
+    FLEXISTORE_EXPORT const char* get_invoice_details_json(int invoice_id);
 }
 
 #endif // FLEXISTORE_POS_FUNCTIONS_H

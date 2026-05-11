@@ -39,8 +39,8 @@ typedef _PosProcessReturnDart = int Function(
   Pointer<Utf8> itemsJson,
 );
 
-typedef _PosGetInvoiceC = Pointer<Utf8> Function(Int32 invoiceId);
-typedef _PosGetInvoiceDart = Pointer<Utf8> Function(int invoiceId);
+typedef _PosGetInvoiceDetailsC = Pointer<Utf8> Function(Int32 invoiceId);
+typedef _PosGetInvoiceDetailsDart = Pointer<Utf8> Function(int invoiceId);
 
 /// Dart FFI bridge to the C++ POS transaction engine.
 ///
@@ -53,7 +53,7 @@ class PosFFI {
   late final _PosValidateStockDart _validateStock;
   late final _PosProcessSaleDart _processSale;
   late final _PosProcessReturnDart _processReturn;
-  late final _PosGetInvoiceDart _getInvoice;
+  late final _PosGetInvoiceDetailsDart _getInvoiceDetails;
 
   PosFFI._internal() {
     _bindFunctions();
@@ -71,8 +71,8 @@ class PosFFI {
     _processReturn = lib.lookupFunction<_PosProcessReturnC, _PosProcessReturnDart>(
       'pos_process_return',
     );
-    _getInvoice = lib.lookupFunction<_PosGetInvoiceC, _PosGetInvoiceDart>(
-      'pos_get_invoice',
+    _getInvoiceDetails = lib.lookupFunction<_PosGetInvoiceDetailsC, _PosGetInvoiceDetailsDart>(
+      'get_invoice_details_json',
     );
   }
 
@@ -131,8 +131,8 @@ class PosFFI {
   }
 
   /// Retrieves an invoice + items as a JSON string from the C++ backend.
-  String getInvoice(int invoiceId) {
-    final ptr = _getInvoice(invoiceId);
+  String getInvoiceDetails(int invoiceId) {
+    final ptr = _getInvoiceDetails(invoiceId);
     return parseJsonAndFree(ptr); // parseJsonAndFree handles the C++ heap free
   }
 

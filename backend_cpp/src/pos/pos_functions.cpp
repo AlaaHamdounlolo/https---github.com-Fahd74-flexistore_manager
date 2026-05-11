@@ -332,7 +332,7 @@ FLEXISTORE_EXPORT int pos_process_return(
     }
 }
 
-FLEXISTORE_EXPORT const char* pos_get_invoice(int invoice_id) {
+FLEXISTORE_EXPORT const char* get_invoice_details_json(int invoice_id) {
     auto& pool = flexistore::DBConnectionPool::getInstance();
     ConnGuard guard{pool, pool.getConnection()};
     if (!guard.c) {

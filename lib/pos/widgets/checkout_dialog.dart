@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import '../../auth/data/session_ffi.dart';
@@ -6,6 +8,7 @@ import '../../clients/screens/clients_screen.dart';
 import '../../installments/data/installments_ffi.dart';
 import '../data/cart_controller.dart';
 import '../data/pos_checkout_service.dart';
+import '../data/pos_ffi.dart';
 import 'invoice_preview_dialog.dart';
 
 // ── Design Tokens ────────────────────────────────────────────────────────────
@@ -673,9 +676,18 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
     // Close the checkout dialog first
     Navigator.pop(context, true);
 
-    // Show the invoice preview with the sale snapshot
-    if (context.mounted) {
-      await showInvoicePreviewDialog(context, result);
+    if (result.invoiceId != null && result.invoiceId! > 0) {
+      try {
+        final jsonStr = PosFFI.instance.getInvoice(result.invoiceId!);
+        final invoiceData = jsonDecode(jsonStr);
+
+        // Show the invoice preview with the actual saved DB data
+        if (context.mounted && invoiceData != null && !invoiceData.containsKey('error')) {
+          await showInvoicePreviewDialog(context, invoiceData);
+        }
+      } catch (e) {
+        debugPrint('Failed to load invoice preview: $e');
+      }
     }
   }
 

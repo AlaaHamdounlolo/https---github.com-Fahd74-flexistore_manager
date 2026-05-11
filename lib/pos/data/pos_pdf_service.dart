@@ -2,39 +2,33 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
-import 'pos_checkout_service.dart';
-
-/// Generates a professional PDF invoice from a [CheckoutResult] and
+/// Generates a professional PDF invoice from raw C++ backend JSON data and
 /// sends it to the system print dialog via the `printing` package.
 class PosPdfService {
   PosPdfService._();
 
   /// Builds the PDF document and opens the system print / preview dialog.
-  static Future<void> printInvoice(CheckoutResult result) async {
+  static Future<void> printInvoice(Map<String, dynamic> invoiceData) async {
     final pdf = pw.Document();
 
     pdf.addPage(
       pw.Page(
         pageFormat: PdfPageFormat.a4,
         margin: const pw.EdgeInsets.all(32),
-        build: (pw.Context context) => _buildPage(result),
+        build: (pw.Context context) => _buildPage(invoiceData),
       ),
     );
 
     await Printing.layoutPdf(
       onLayout: (PdfPageFormat format) async => pdf.save(),
-      name: 'FlexiStore_Invoice_${DateTime.now().millisecondsSinceEpoch}',
+      name: 'FlexiStore_Invoice_${invoiceData['id']}',
     );
   }
 
   /// Internal: builds the full page layout.
-  static pw.Widget _buildPage(CheckoutResult result) {
-    final now = DateTime.now();
-    final dateStr =
-        '${now.year}-${_pad(now.month)}-${_pad(now.day)}  ${_pad(now.hour)}:${_pad(now.minute)}';
-    final invoiceLabel = result.invoiceId != null
-        ? 'INV-${result.invoiceId}'
-        : 'TXN-${now.millisecondsSinceEpoch.toString().substring(5)}';
+  static pw.Widget _buildPage(Map<String, dynamic> invoiceData) {
+    final dateStr = invoiceData['created_at'] ?? 'N/A';
+    final invoiceLabel = 'INV-${invoiceData['id']}';
 
     return pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
@@ -44,15 +38,15 @@ class PosPdfService {
         pw.SizedBox(height: 16),
 
         // ── Parties ──
-        _buildParties(result),
+        _buildParties(invoiceData),
         pw.SizedBox(height: 20),
 
         // ── Items Table ──
-        _buildItemsTable(result),
+        _buildItemsTable(invoiceData),
         pw.SizedBox(height: 20),
 
         // ── Summary ──
-        _buildSummary(result),
+        _buildSummary(invoiceData),
         pw.SizedBox(height: 30),
 
         // ── Footer ──
@@ -130,14 +124,13 @@ class PosPdfService {
 
   // ── Parties ─────────────────────────────────────────────────────────────────
 
-  static pw.Widget _buildParties(CheckoutResult result) {
+  static pw.Widget _buildParties(Map<String, dynamic> invoiceData) {
     return pw.Row(
       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
       children: [
-        _infoBlock('Cashier', result.cashierName ?? 'N/A'),
-        _infoBlock('Client',
-            result.clientName?.isNotEmpty == true ? result.clientName! : 'Guest'),
-        _infoBlock('Payment', result.paymentMethod ?? 'Cash'),
+        _infoBlock('Cashier', invoiceData['cashier_name'] ?? 'N/A'),
+        _infoBlock('Client', invoiceData['client_name'] ?? 'Guest'),
+        _infoBlock('Payment', (invoiceData['payment_type'] ?? 'Cash').toString().toUpperCase()),
       ],
     );
   }
@@ -163,8 +156,8 @@ class PosPdfService {
 
   // ── Items Table ─────────────────────────────────────────────────────────────
 
-  static pw.Widget _buildItemsTable(CheckoutResult result) {
-    final items = result.items ?? [];
+  static pw.Widget _buildItemsTable(Map<String, dynamic> invoiceData) {
+    final items = invoiceData['items'] as List? ?? [];
     return pw.TableHelper.fromTextArray(
       border: pw.TableBorder.all(color: PdfColor.fromHex('#334155'), width: 0.5),
       headerStyle: pw.TextStyle(
@@ -181,13 +174,13 @@ class PosPdfService {
       cellPadding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       headers: ['#', 'Product', 'Qty', 'Unit Price', 'Total'],
       data: List.generate(items.length, (i) {
-        final ci = items[i];
+        final item = items[i];
         return [
           '${i + 1}',
-          ci.product.name,
-          '${ci.quantity}',
-          '\$${ci.product.sellingPrice.toStringAsFixed(2)}',
-          '\$${ci.lineTotal.toStringAsFixed(2)}',
+          item['product_name'] ?? 'Product ${item['product_id']}',
+          '${item['quantity']}',
+          '\$${(item['unit_price'] ?? 0.0).toStringAsFixed(2)}',
+          '\$${(item['line_total'] ?? 0.0).toStringAsFixed(2)}',
         ];
       }),
     );
@@ -195,10 +188,10 @@ class PosPdfService {
 
   // ── Summary ─────────────────────────────────────────────────────────────────
 
-  static pw.Widget _buildSummary(CheckoutResult result) {
-    final subtotal = result.subtotal ?? 0.0;
-    final discount = result.discount ?? 0.0;
-    final total = result.totalAmount ?? 0.0;
+  static pw.Widget _buildSummary(Map<String, dynamic> invoiceData) {
+    final subtotal = invoiceData['total_amount'] ?? 0.0;
+    final total = invoiceData['net_amount'] ?? 0.0;
+    final discount = subtotal - total;
 
     return pw.Container(
       alignment: pw.Alignment.centerRight,
@@ -213,7 +206,7 @@ class PosPdfService {
         child: pw.Column(
           children: [
             _summaryLine('Subtotal', '\$${subtotal.toStringAsFixed(2)}'),
-            if (discount > 0) ...[
+            if (discount > 0.01) ...[
               pw.SizedBox(height: 4),
               _summaryLine('Discount', '-\$${discount.toStringAsFixed(2)}',
                   color: PdfColor.fromHex('#F59E0B')),
@@ -273,8 +266,4 @@ class PosPdfService {
       ),
     );
   }
-
-  // ── Utils ───────────────────────────────────────────────────────────────────
-
-  static String _pad(int n) => n.toString().padLeft(2, '0');
 }

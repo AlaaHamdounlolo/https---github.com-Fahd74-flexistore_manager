@@ -1,16 +1,18 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../inventory/data/inventory_ffi.dart';
 import 'cart_model.dart';
+import 'pos_ffi.dart';
 
-/// Singleton controller that owns all POS-screen reactive state.
+/// Singleton controller that acts STRICTLY as a simple list manager for the UI.
 ///
 /// Responsibilities:
-///  • Cart management with **stock validation**
-///  • Product list loading & **category filtering**
-///  • Discount application
+///  • Cart state holder (List<CartItem>)
+///  • Product list loading & category filtering
 ///
-/// UI listens via [ValueListenableBuilder] on the public notifiers.
+/// Constraint: ZERO Business Intelligence. 
+/// All stock validation and calculations are delegated to the C++ FFI bridge.
 class CartController {
   // ── Singleton ──────────────────────────────────────────────────────────────
   static final CartController instance = CartController._internal();
@@ -44,6 +46,8 @@ class CartController {
 
   List<CartItem> get cartItems => cartNotifier.value;
 
+  // Note: These totals are purely for immediate UI display. 
+  // The actual transaction totals are re-calculated securely in the C++ backend.
   double get subtotal =>
       cartItems.fold(0.0, (sum, item) => sum + item.lineTotal);
 
@@ -73,11 +77,6 @@ class CartController {
   // ── Category Filtering ─────────────────────────────────────────────────────
 
   /// Filters the product list by [categoryName].
-  ///
-  /// • "All" → restores the full list.
-  /// • Any other value → shows only products whose `category` matches.
-  ///
-  /// Also respects the current search query.
   void filterProducts(String categoryName) {
     selectedCategoryNotifier.value = categoryName;
     _applyFilters();
@@ -120,47 +119,46 @@ class CartController {
     return idx == -1 ? 0 : cartItems[idx].quantity;
   }
 
-  /// Adds one unit of [product] to the cart.
-  ///
-  /// **Stock Validation**: if `cartQty >= product.stockQuantity`,
-  /// returns [AddToCartResult.maxStockReached] and the cart is unchanged.
+  /// Adds one unit of [product] to the cart, delegating stock validation to C++.
   AddToCartResult addToCart(Product product) {
-    // ── Guard: out-of-stock products can never be added ──
-    if (product.stockQuantity <= 0) {
-      return AddToCartResult.outOfStock;
-    }
-
     final items = List<CartItem>.from(cartItems);
     final idx = items.indexWhere((ci) => ci.product.id == product.id);
 
     if (idx != -1) {
-      // Product already in cart – check if we can increment
       final existing = items[idx];
-      if (existing.quantity >= product.stockQuantity) {
-        return AddToCartResult.maxStockReached;
-      }
       items[idx] = existing.copyWith(quantity: existing.quantity + 1);
     } else {
-      // New product – first unit
       items.add(CartItem(product: product, quantity: 1));
+    }
+
+    // Delegate stock validation completely to the C++ FFI Engine
+    // 0 = FFI_SUCCESS
+    final validationResult = PosFFI.instance.validateStock(items);
+    if (validationResult != 0) {
+      return AddToCartResult.maxStockReached;
     }
 
     cartNotifier.value = items;
     return AddToCartResult.success;
   }
 
-  /// Sets the quantity of a cart item to [newQty].
-  ///
-  /// Clamps between 1 and `product.stockQuantity`.
-  /// Returns `false` if the item wasn't found.
+  /// Sets the quantity of a cart item to [newQty], delegating stock validation to C++.
   bool updateQuantity(int productId, int newQty) {
+    if (newQty <= 0) return false;
+
     final items = List<CartItem>.from(cartItems);
     final idx = items.indexWhere((ci) => ci.product.id == productId);
     if (idx == -1) return false;
 
     final item = items[idx];
-    final clamped = newQty.clamp(1, item.product.stockQuantity);
-    items[idx] = item.copyWith(quantity: clamped);
+    items[idx] = item.copyWith(quantity: newQty);
+
+    // Delegate stock validation completely to the C++ FFI Engine
+    final validationResult = PosFFI.instance.validateStock(items);
+    if (validationResult != 0) {
+      return false; // Stock limit reached
+    }
+
     cartNotifier.value = items;
     return true;
   }
@@ -181,6 +179,19 @@ class CartController {
   void clearCart() {
     cartNotifier.value = [];
     discountNotifier.value = 0.0;
+  }
+
+  // ── JSON Serialization for C++ Bridge ──────────────────────────────────────
+
+  /// Optimizes the cart items into a JSON string exclusively formatted for 
+  /// the C++ PosFFI bridge engine.
+  String getCartAsJson() {
+    final list = cartItems.map((ci) => {
+      'product_id': ci.product.id,
+      'quantity': ci.quantity,
+      'unit_price': ci.product.sellingPrice,
+    }).toList();
+    return jsonEncode(list);
   }
 }
 

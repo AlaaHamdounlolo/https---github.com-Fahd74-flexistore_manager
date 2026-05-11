@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../data/pos_checkout_service.dart';
 import '../data/pos_pdf_service.dart';
 
 // ── Design Tokens ────────────────────────────────────────────────────────────
@@ -15,16 +14,15 @@ const _kTextSecondary = Color(0xFF94A3B8);
 
 /// Shows the invoice preview dialog after a successful checkout.
 ///
-/// The dialog displays the full invoice details and provides a "Print PDF"
-/// button. The Return button has been relocated to [PosScreen] sidebar.
+/// Displays the actual invoice data retrieved from the C++ backend.
 Future<void> showInvoicePreviewDialog(
   BuildContext context,
-  CheckoutResult result,
+  Map<String, dynamic> invoiceData,
 ) async {
   await showDialog(
     context: context,
     barrierDismissible: false,
-    builder: (ctx) => _InvoicePreviewDialog(result: result),
+    builder: (ctx) => _InvoicePreviewDialog(invoiceData: invoiceData),
   );
 }
 
@@ -33,18 +31,14 @@ Future<void> showInvoicePreviewDialog(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _InvoicePreviewDialog extends StatelessWidget {
-  final CheckoutResult result;
-  const _InvoicePreviewDialog({required this.result});
+  final Map<String, dynamic> invoiceData;
+  const _InvoicePreviewDialog({required this.invoiceData});
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final dateStr =
-        '${now.year}-${_pad(now.month)}-${_pad(now.day)}  ${_pad(now.hour)}:${_pad(now.minute)}';
-    final invoiceLabel = result.invoiceId != null
-        ? 'INV-${result.invoiceId}'
-        : 'TXN-${now.millisecondsSinceEpoch.toString().substring(5)}';
-    final items = result.items ?? [];
+    final invoiceLabel = 'INV-${invoiceData['id']}';
+    final dateStr = invoiceData['created_at'] ?? 'N/A';
+    final items = invoiceData['items'] as List? ?? [];
 
     return Dialog(
       backgroundColor: _kSurface,
@@ -173,17 +167,13 @@ class _InvoicePreviewDialog extends StatelessWidget {
   // ── Parties Row ─────────────────────────────────────────────────────────────
 
   Widget _buildPartiesRow() {
-    final clientName = result.clientName?.isNotEmpty == true
-        ? result.clientName!
-        : 'Guest';
-
     return Row(
       children: [
         Expanded(
           child: _infoCard(
             icon: Icons.badge_rounded,
             label: 'Cashier',
-            value: result.cashierName ?? 'N/A',
+            value: invoiceData['cashier_name'] ?? 'N/A',
           ),
         ),
         const SizedBox(width: 10),
@@ -191,7 +181,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
           child: _infoCard(
             icon: Icons.person_rounded,
             label: 'Client',
-            value: clientName,
+            value: invoiceData['client_name'] ?? 'Guest',
           ),
         ),
         const SizedBox(width: 10),
@@ -199,7 +189,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
           child: _infoCard(
             icon: Icons.payment_rounded,
             label: 'Payment',
-            value: result.paymentMethod ?? 'Cash',
+            value: (invoiceData['payment_type'] ?? 'Cash').toString().toUpperCase(),
           ),
         ),
       ],
@@ -306,7 +296,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
           ),
           // Rows
           ...List.generate(items.length, (i) {
-            final ci = items[i];
+            final item = items[i];
             return Container(
               padding:
                   const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -324,7 +314,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
                           style: const TextStyle(
                               color: _kTextSecondary, fontSize: 12))),
                   Expanded(
-                      child: Text(ci.product.name,
+                      child: Text(item['product_name'] ?? 'Product ${item['product_id']}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -333,21 +323,21 @@ class _InvoicePreviewDialog extends StatelessWidget {
                               fontWeight: FontWeight.w500))),
                   SizedBox(
                       width: 40,
-                      child: Text('${ci.quantity}',
+                      child: Text('${item['quantity']}',
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                               color: _kTextPrimary, fontSize: 12))),
                   SizedBox(
                       width: 70,
                       child: Text(
-                          '\$${ci.product.sellingPrice.toStringAsFixed(2)}',
+                          '\$${(item['unit_price'] ?? 0.0).toStringAsFixed(2)}',
                           textAlign: TextAlign.right,
                           style: const TextStyle(
                               color: _kTextSecondary, fontSize: 12))),
                   SizedBox(
                       width: 70,
                       child: Text(
-                          '\$${ci.lineTotal.toStringAsFixed(2)}',
+                          '\$${(item['line_total'] ?? 0.0).toStringAsFixed(2)}',
                           textAlign: TextAlign.right,
                           style: const TextStyle(
                               color: _kGreen,
@@ -365,9 +355,9 @@ class _InvoicePreviewDialog extends StatelessWidget {
   // ── Totals ──────────────────────────────────────────────────────────────────
 
   Widget _buildTotals() {
-    final subtotal = result.subtotal ?? 0.0;
-    final discount = result.discount ?? 0.0;
-    final total = result.totalAmount ?? 0.0;
+    final subtotal = invoiceData['total_amount'] ?? 0.0;
+    final total = invoiceData['net_amount'] ?? 0.0;
+    final discount = subtotal - total;
 
     return Container(
       padding: const EdgeInsets.all(14),
@@ -379,7 +369,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
       child: Column(
         children: [
           _totalLine('Subtotal', '\$${subtotal.toStringAsFixed(2)}'),
-          if (discount > 0) ...[
+          if (discount > 0.01) ...[
             const SizedBox(height: 6),
             _totalLine(
                 'Discount', '-\$${discount.toStringAsFixed(2)}',
@@ -445,7 +435,7 @@ class _InvoicePreviewDialog extends StatelessWidget {
           Expanded(
             flex: 2,
             child: ElevatedButton.icon(
-              onPressed: () => PosPdfService.printInvoice(result),
+              onPressed: () => PosPdfService.printInvoice(invoiceData),
               icon: const Icon(Icons.print_rounded, size: 18),
               label: const Text('Print PDF',
                   style:
@@ -465,8 +455,4 @@ class _InvoicePreviewDialog extends StatelessWidget {
       ),
     );
   }
-
-  // ── Utils ───────────────────────────────────────────────────────────────────
-
-  static String _pad(int n) => n.toString().padLeft(2, '0');
 }

@@ -73,7 +73,9 @@ FLEXISTORE_EXPORT const char* get_dashboard_stats(int user_id) {
                 "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = CURDATE() THEN net_amount ELSE 0 END), 0) AS CHAR) AS today_rev, "
                 "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN net_amount ELSE 0 END), 0) AS CHAR) AS yest_rev, "
                 "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = CURDATE() THEN 1 ELSE 0 END), 0) AS CHAR) AS today_sales, "
-                "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN 1 ELSE 0 END), 0) AS CHAR) AS yest_sales "
+                "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN 1 ELSE 0 END), 0) AS CHAR) AS yest_sales, "
+                "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = CURDATE() AND payment_type != 'return' THEN net_amount ELSE 0 END), 0) AS CHAR) AS today_cash_sales, "
+                "  CAST(IFNULL(SUM(CASE WHEN DATE(created_at) = CURDATE() AND payment_type = 'return' THEN ABS(net_amount) ELSE 0 END), 0) AS CHAR) AS today_returns "
                 "FROM invoices "
                 "WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)"
             ));
@@ -83,17 +85,24 @@ FLEXISTORE_EXPORT const char* get_dashboard_stats(int user_id) {
                 double yest_rev = safe_decimal(rs.get(), "yest_rev");
                 int today_sales = safe_int(rs.get(), "today_sales");
                 int yest_sales = safe_int(rs.get(), "yest_sales");
+                double today_cash = safe_decimal(rs.get(), "today_cash_sales");
+                double today_ret = safe_decimal(rs.get(), "today_returns");
 
                 builder.add_double("today_revenue", today_rev);
                 builder.add_double("revenue_growth", calc_growth(today_rev, yest_rev));
                 
                 builder.add_int("total_sales_count", today_sales);
                 builder.add_double("sales_growth", calc_growth(today_sales, yest_sales));
+
+                builder.add_double("today_cash_sales", today_cash);
+                builder.add_double("today_returns", today_ret);
             } else {
                 builder.add_double("today_revenue", 0.0);
                 builder.add_double("revenue_growth", 0.0);
                 builder.add_int("total_sales_count", 0);
                 builder.add_double("sales_growth", 0.0);
+                builder.add_double("today_cash_sales", 0.0);
+                builder.add_double("today_returns", 0.0);
             }
         }
 

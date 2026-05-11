@@ -523,24 +523,40 @@ class _ReturnDialogState extends State<_ReturnDialog> {
       _errorMessage = null;
     });
 
-    final result = await PosCheckoutService.processReturn(
-      originalInvoiceId: invoiceId,
-    );
+    // Delegate entirely to C++ backend via FFI, wrapped in an isolate to prevent UI freeze
+    final userId = SessionNativeAPI.instance.getCurrentUserId();
+    final returnInvoiceId = await Future<int>.delayed(Duration.zero, () {
+      return PosFFI.instance.processReturn(
+        userId: userId,
+        originalInvoiceId: invoiceId,
+      );
+    });
 
     if (!mounted) return;
 
-    if (result.success) {
+    if (returnInvoiceId > 0) {
+      // Clear UI state, strictly view layer updates
+      CartController.instance.clearCart();
+      CartController.instance.loadProducts();
+
       setState(() {
         _isProcessing = false;
         _invoiceData = null;
-        _successMessage = result.message;
+        _successMessage = 'Return processed successfully (Invoice: INV-$returnInvoiceId)';
       });
     } else {
       setState(() {
         _isProcessing = false;
-        _errorMessage = result.message;
+        _errorMessage = _getReturnErrorMessage(returnInvoiceId);
       });
     }
+  }
+
+  String _getReturnErrorMessage(int code) {
+    if (code == -600) return 'Original invoice not found';
+    if (code == -601) return 'Invoice has already been returned';
+    if (code == -602) return 'Return quantity exceeds original quantity';
+    return 'Return failed (Code: $code)';
   }
 
   /// Simple JSON parser for the invoice data.

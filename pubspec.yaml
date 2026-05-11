@@ -39,6 +39,8 @@ dependencies:
   go_router: ^17.2.2
   crypto: ^3.0.7
   fl_chart: ^1.2.0
+  pdf: ^3.11.1
+  printing: ^5.13.4
 
 dev_dependencies:
   flutter_test:

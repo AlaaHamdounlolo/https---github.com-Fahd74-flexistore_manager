@@ -4,36 +4,32 @@
 #include "../core/session_manager.h"
 #include "../inventory/stock_manager.h"
 #include "../audit/audit_logger.h"
+#include "../data/invoice_queries.h"
 
 #include <mysql/jdbc.h>
 #include <string>
 #include <vector>
-#include <sstream>
 #include <mutex>
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
 
 using namespace std;
+using namespace flexistore::data;
 
 namespace {
 
-// ── Minimal JSON parsing helpers (no external dep) ───────────────────────────
-
+// JSON Parsing Helpers
 struct CartItemData {
     int product_id;
     int quantity;
     double unit_price;
 };
 
-/// Skips whitespace in a C-string from position `pos`.
 void skip_ws(const char* s, size_t& pos) {
-    while (s[pos] && (s[pos] == ' ' || s[pos] == '\t' ||
-                      s[pos] == '\n' || s[pos] == '\r'))
-        ++pos;
+    while (s[pos] && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n' || s[pos] == '\r')) ++pos;
 }
 
-/// Parses a JSON number (int or double) from position `pos`.
 double parse_number(const char* s, size_t& pos) {
     size_t start = pos;
     if (s[pos] == '-') ++pos;
@@ -46,23 +42,18 @@ double parse_number(const char* s, size_t& pos) {
     return std::stod(num_str);
 }
 
-/// Parses a JSON string (expects opening quote at pos).
 string parse_string(const char* s, size_t& pos) {
     if (s[pos] != '"') return "";
-    ++pos; // skip opening "
+    ++pos; 
     string result;
     while (s[pos] && s[pos] != '"') {
-        if (s[pos] == '\\' && s[pos + 1]) {
-            ++pos;
-        }
+        if (s[pos] == '\\' && s[pos + 1]) ++pos;
         result += s[pos++];
     }
-    if (s[pos] == '"') ++pos; // skip closing "
+    if (s[pos] == '"') ++pos; 
     return result;
 }
 
-/// Parses a JSON array of cart items.
-/// Expected format: [{"product_id":1,"quantity":2,"unit_price":10.5}, ...]
 vector<CartItemData> parse_items_json(const char* json) {
     vector<CartItemData> items;
     if (!json) return items;
@@ -70,14 +61,14 @@ vector<CartItemData> parse_items_json(const char* json) {
     size_t pos = 0;
     skip_ws(json, pos);
     if (json[pos] != '[') return items;
-    ++pos; // skip '['
+    ++pos; 
 
     while (json[pos]) {
         skip_ws(json, pos);
         if (json[pos] == ']') break;
         if (json[pos] == ',') { ++pos; continue; }
         if (json[pos] != '{') break;
-        ++pos; // skip '{'
+        ++pos; 
 
         CartItemData item = {0, 0, 0.0};
         while (json[pos] && json[pos] != '}') {
@@ -95,7 +86,6 @@ vector<CartItemData> parse_items_json(const char* json) {
             } else if (key == "unit_price") {
                 item.unit_price = parse_number(json, pos);
             } else {
-                // skip unknown value (number or string)
                 if (json[pos] == '"') parse_string(json, pos);
                 else parse_number(json, pos);
             }
@@ -110,21 +100,15 @@ vector<CartItemData> parse_items_json(const char* json) {
 
 std::mutex pos_mutex;
 
-// RAII guard for db connection
 struct ConnGuard {
     flexistore::DBConnectionPool& p;
     unique_ptr<sql::Connection> c;
     ~ConnGuard() { if (c) p.releaseConnection(std::move(c)); }
 };
 
-} // anonymous namespace
-
+} // namespace
 
 extern "C" {
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// pos_validate_stock
-// ═══════════════════════════════════════════════════════════════════════════════
 
 FLEXISTORE_EXPORT int pos_validate_stock(const char* items_json) {
     if (!items_json) return FFI_ERROR_INVALID_INPUT;
@@ -136,28 +120,28 @@ FLEXISTORE_EXPORT int pos_validate_stock(const char* items_json) {
     ConnGuard guard{pool, pool.getConnection()};
     if (!guard.c) return FFI_ERROR_DB_CONNECTION;
 
+    sql::Connection* conn = guard.c.get();
+    
+    // We start a transaction so that the locks held by validateStock (SELECT FOR UPDATE)
+    // are valid during the checks.
     try {
-        for (auto& ci : items) {
-            unique_ptr<sql::PreparedStatement> stmt(guard.c->prepareStatement(
-                "SELECT stock_quantity FROM products WHERE id = ? AND status = 'active'"
-            ));
-            stmt->setInt(1, ci.product_id);
-            unique_ptr<sql::ResultSet> rs(stmt->executeQuery());
-
-            if (!rs->next()) return FFI_ERROR_INV_PRODUCT_NOT_FOUND;
-
-            int stock = rs->getInt("stock_quantity");
-            if (stock < ci.quantity) return FFI_ERROR_POS_INSUFFICIENT_STOCK;
+        conn->setAutoCommit(false);
+        for (const auto& ci : items) {
+            int status = flexistore::data::validateStock(conn, ci.product_id, ci.quantity);
+            if (status != FFI_SUCCESS) {
+                conn->rollback();
+                conn->setAutoCommit(true);
+                return status;
+            }
         }
+        conn->rollback(); // Don't hold locks for pre-flight check
+        conn->setAutoCommit(true);
         return FFI_SUCCESS;
-    } catch (sql::SQLException&) {
+    } catch (...) {
+        try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
         return FFI_ERROR_DB_QUERY;
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// pos_process_sale — atomic transaction
-// ═══════════════════════════════════════════════════════════════════════════════
 
 FLEXISTORE_EXPORT int pos_process_sale(
     int user_id,
@@ -181,79 +165,39 @@ FLEXISTORE_EXPORT int pos_process_sale(
     sql::Connection* conn = guard.c.get();
 
     try {
-        // ── BEGIN TRANSACTION ─────────────────────────────────────────────
         conn->setAutoCommit(false);
 
-        // ── Step 1: Validate stock with row locks ─────────────────────────
-        for (auto& ci : items) {
-            unique_ptr<sql::PreparedStatement> stmt(conn->prepareStatement(
-                "SELECT stock_quantity FROM products "
-                "WHERE id = ? AND status = 'active' FOR UPDATE"
-            ));
-            stmt->setInt(1, ci.product_id);
-            unique_ptr<sql::ResultSet> rs(stmt->executeQuery());
-
-            if (!rs->next()) {
+        // 1. Validate Stock using DAL
+        for (const auto& ci : items) {
+            int status = flexistore::data::validateStock(conn, ci.product_id, ci.quantity);
+            if (status != FFI_SUCCESS) {
                 conn->rollback();
                 conn->setAutoCommit(true);
-                return FFI_ERROR_INV_PRODUCT_NOT_FOUND;
-            }
-
-            int current_stock = rs->getInt("stock_quantity");
-            if (current_stock < ci.quantity) {
-                conn->rollback();
-                conn->setAutoCommit(true);
-                return FFI_ERROR_POS_INSUFFICIENT_STOCK;
+                return status;
             }
         }
 
-        // ── Step 2: Create invoice ────────────────────────────────────────
-        unique_ptr<sql::PreparedStatement> inv_stmt(conn->prepareStatement(
-            "INSERT INTO invoices (client_id, user_id, total_amount, net_amount, payment_type) "
-            "VALUES (?, ?, ?, ?, ?)"
-        ));
-
-        if (client_id > 0) {
-            inv_stmt->setInt(1, client_id);
-        } else {
-            inv_stmt->setNull(1, sql::DataType::INTEGER);
+        // 2. Prepare DAL Invoice Items
+        vector<InvoiceItem> dal_items;
+        for (const auto& ci : items) {
+            dal_items.push_back({ci.product_id, ci.quantity, ci.unit_price});
         }
-        inv_stmt->setInt(2, user_id);
-        inv_stmt->setDouble(3, total_amount);
-        inv_stmt->setDouble(4, net_amount);
-        inv_stmt->setString(5, payment_type);
-        inv_stmt->executeUpdate();
 
-        // Get the generated invoice_id
-        unique_ptr<sql::Statement> id_stmt(conn->createStatement());
-        unique_ptr<sql::ResultSet> id_rs(id_stmt->executeQuery("SELECT LAST_INSERT_ID() AS id"));
-        int invoice_id = 0;
-        if (id_rs->next()) {
-            invoice_id = id_rs->getInt("id");
-        }
+        // 3. Save Invoice using DAL
+        int invoice_id = flexistore::data::saveFullInvoice(
+            conn, user_id, client_id, total_amount, net_amount, payment_type, dal_items
+        );
+
         if (invoice_id <= 0) {
             conn->rollback();
             conn->setAutoCommit(true);
-            return FFI_ERROR_POS_INVOICE_FAILED;
+            return invoice_id; // returns FFI_ERROR_POS_INVOICE_FAILED
         }
 
-        // ── Step 3: Insert invoice_items + deduct stock ───────────────────
-        for (auto& ci : items) {
-            // Insert item row
-            unique_ptr<sql::PreparedStatement> item_stmt(conn->prepareStatement(
-                "INSERT INTO invoice_items (invoice_id, product_id, quantity, unit_price) "
-                "VALUES (?, ?, ?, ?)"
-            ));
-            item_stmt->setInt(1, invoice_id);
-            item_stmt->setInt(2, ci.product_id);
-            item_stmt->setInt(3, ci.quantity);
-            item_stmt->setDouble(4, ci.unit_price);
-            item_stmt->executeUpdate();
-
-            // Deduct stock using Team 2's stock_manager (pass conn for transactional safety)
-            int stock_result = flexistore::restock_product(
-                ci.product_id, -ci.quantity, user_id, conn
-            );
+        // 4. Update Stock and Log Inventory Changes
+        // restock_product internally calls log_inventory_change
+        for (const auto& ci : items) {
+            int stock_result = flexistore::restock_product(ci.product_id, -ci.quantity, user_id, conn);
             if (stock_result != FFI_SUCCESS) {
                 conn->rollback();
                 conn->setAutoCommit(true);
@@ -261,34 +205,22 @@ FLEXISTORE_EXPORT int pos_process_sale(
             }
         }
 
-        // ── Step 4: COMMIT ────────────────────────────────────────────────
+        // 5. Commit Transaction
         conn->commit();
         conn->setAutoCommit(true);
 
-        // ── Step 5: Audit logging (outside transaction — non-critical) ────
+        // 6. Audit Log Transaction
         string action_type = string("POS_") + payment_type + "_SALE";
-        // Convert to uppercase
         for (auto& ch : action_type) ch = static_cast<char>(toupper(ch));
-
         log_transaction(user_id, action_type.c_str(), net_amount);
 
-        // Return invoice_id as success code (always > 0)
         return invoice_id;
 
-    } catch (sql::SQLException& e) {
-        std::cerr << "[POS] SQLException in pos_process_sale: " << e.what() << std::endl;
-        try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
-        return FFI_ERROR_DB_QUERY;
-    } catch (std::exception& e) {
-        std::cerr << "[POS] Exception in pos_process_sale: " << e.what() << std::endl;
+    } catch (...) {
         try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
         return FFI_ERROR_UNKNOWN;
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// pos_process_return — atomic return transaction
-// ═══════════════════════════════════════════════════════════════════════════════
 
 FLEXISTORE_EXPORT int pos_process_return(
     int user_id,
@@ -306,92 +238,37 @@ FLEXISTORE_EXPORT int pos_process_return(
     sql::Connection* conn = guard.c.get();
 
     try {
-        // ── BEGIN TRANSACTION ─────────────────────────────────────────────
         conn->setAutoCommit(false);
 
-        // ── Step 1: Verify original invoice exists and is not a return ─────
-        unique_ptr<sql::PreparedStatement> inv_check(conn->prepareStatement(
-            "SELECT id, client_id, user_id, payment_type, "
-            "       CAST(net_amount AS CHAR) AS net_amount "
-            "FROM invoices WHERE id = ? FOR UPDATE"
-        ));
-        inv_check->setInt(1, original_invoice_id);
-        unique_ptr<sql::ResultSet> inv_rs(inv_check->executeQuery());
-
-        if (!inv_rs->next()) {
+        // 1. Fetch Original Invoice using DAL
+        InvoiceRecord orig_invoice;
+        int fetch_status = flexistore::data::findInvoiceById(conn, original_invoice_id, orig_invoice);
+        if (fetch_status != FFI_SUCCESS) {
             conn->rollback();
             conn->setAutoCommit(true);
-            return FFI_ERROR_RET_INVOICE_NOT_FOUND;
+            return fetch_status;
         }
 
-        string orig_payment_type = inv_rs->getString("payment_type");
-        if (orig_payment_type == "return") {
+        if (orig_invoice.payment_type == "return") {
             conn->rollback();
             conn->setAutoCommit(true);
             return FFI_ERROR_RET_ALREADY_RETURNED;
         }
 
-        int orig_client_id = inv_rs->getInt("client_id");
-        bool client_is_null = inv_rs->wasNull();
-
-        string net_str = inv_rs->getString("net_amount");
-        double orig_net = 0.0;
-        try { orig_net = std::stod(net_str); } catch (...) {}
-
-        // ── Step 2: Fetch original invoice items ──────────────────────────
-        unique_ptr<sql::PreparedStatement> items_fetch(conn->prepareStatement(
-            "SELECT product_id, quantity, "
-            "       CAST(unit_price AS CHAR) AS unit_price "
-            "FROM invoice_items WHERE invoice_id = ?"
-        ));
-        items_fetch->setInt(1, original_invoice_id);
-        unique_ptr<sql::ResultSet> items_rs(items_fetch->executeQuery());
-
-        // Build list of original items
-        struct OrigItem {
-            int product_id;
-            int quantity;
-            double unit_price;
-        };
-        vector<OrigItem> orig_items;
-        while (items_rs->next()) {
-            OrigItem oi;
-            oi.product_id = items_rs->getInt("product_id");
-            oi.quantity = items_rs->getInt("quantity");
-            string price_s = items_rs->getString("unit_price");
-            try { oi.unit_price = std::stod(price_s); } catch (...) { oi.unit_price = 0.0; }
-            orig_items.push_back(oi);
-        }
-
-        if (orig_items.empty()) {
-            conn->rollback();
-            conn->setAutoCommit(true);
-            return FFI_ERROR_RET_INVOICE_NOT_FOUND;
-        }
-
-        // ── Step 3: Determine which items to return ───────────────────────
-        // If items_json is provided, use those quantities (partial return).
-        // Otherwise, return all original items (full return).
-        vector<CartItemData> return_items;
-
+        // 2. Determine Items to Return
+        vector<InvoiceItem> return_items;
         if (items_json && strlen(items_json) > 2) {
             auto requested = parse_items_json(items_json);
-
-            // Validate each requested return item against original
-            for (auto& req : requested) {
+            for (const auto& req : requested) {
                 bool found = false;
-                for (auto& oi : orig_items) {
+                for (const auto& oi : orig_invoice.items) {
                     if (oi.product_id == req.product_id) {
                         if (req.quantity > oi.quantity) {
                             conn->rollback();
                             conn->setAutoCommit(true);
                             return FFI_ERROR_RET_INVALID_QUANTITY;
                         }
-                        CartItemData ci;
-                        ci.product_id = oi.product_id;
-                        ci.quantity = req.quantity;
-                        ci.unit_price = oi.unit_price;
-                        return_items.push_back(ci);
+                        return_items.push_back({oi.product_id, req.quantity, oi.unit_price});
                         found = true;
                         break;
                     }
@@ -403,14 +280,8 @@ FLEXISTORE_EXPORT int pos_process_return(
                 }
             }
         } else {
-            // Full return — all original items
-            for (auto& oi : orig_items) {
-                CartItemData ci;
-                ci.product_id = oi.product_id;
-                ci.quantity = oi.quantity;
-                ci.unit_price = oi.unit_price;
-                return_items.push_back(ci);
-            }
+            // Full return
+            return_items = orig_invoice.items;
         }
 
         if (return_items.empty()) {
@@ -419,58 +290,26 @@ FLEXISTORE_EXPORT int pos_process_return(
             return FFI_ERROR_POS_EMPTY_CART;
         }
 
-        // ── Step 4: Calculate return total ─────────────────────────────────
+        // 3. Calculate Return Total
         double return_total = 0.0;
-        for (auto& ri : return_items) {
+        for (const auto& ri : return_items) {
             return_total += ri.unit_price * ri.quantity;
         }
 
-        // ── Step 5: Create the return invoice ─────────────────────────────
-        unique_ptr<sql::PreparedStatement> ret_inv(conn->prepareStatement(
-            "INSERT INTO invoices (client_id, user_id, total_amount, net_amount, payment_type) "
-            "VALUES (?, ?, ?, ?, 'return')"
-        ));
+        // 4. Save Return Invoice using DAL
+        int return_invoice_id = flexistore::data::saveFullInvoice(
+            conn, user_id, orig_invoice.client_id, -return_total, -return_total, "return", return_items
+        );
 
-        if (!client_is_null && orig_client_id > 0) {
-            ret_inv->setInt(1, orig_client_id);
-        } else {
-            ret_inv->setNull(1, sql::DataType::INTEGER);
-        }
-        ret_inv->setInt(2, user_id);
-        ret_inv->setDouble(3, -return_total); // negative total for returns
-        ret_inv->setDouble(4, -return_total);
-        ret_inv->executeUpdate();
-
-        // Get return invoice_id
-        unique_ptr<sql::Statement> id_stmt(conn->createStatement());
-        unique_ptr<sql::ResultSet> id_rs(id_stmt->executeQuery("SELECT LAST_INSERT_ID() AS id"));
-        int return_invoice_id = 0;
-        if (id_rs->next()) {
-            return_invoice_id = id_rs->getInt("id");
-        }
         if (return_invoice_id <= 0) {
             conn->rollback();
             conn->setAutoCommit(true);
-            return FFI_ERROR_POS_INVOICE_FAILED;
+            return return_invoice_id;
         }
 
-        // ── Step 6: Insert return invoice_items + restock ─────────────────
-        for (auto& ri : return_items) {
-            // Insert return item row
-            unique_ptr<sql::PreparedStatement> item_stmt(conn->prepareStatement(
-                "INSERT INTO invoice_items (invoice_id, product_id, quantity, unit_price) "
-                "VALUES (?, ?, ?, ?)"
-            ));
-            item_stmt->setInt(1, return_invoice_id);
-            item_stmt->setInt(2, ri.product_id);
-            item_stmt->setInt(3, ri.quantity);
-            item_stmt->setDouble(4, ri.unit_price);
-            item_stmt->executeUpdate();
-
-            // Restock: add quantity back using Team 2's stock_manager (+qty)
-            int stock_result = flexistore::restock_product(
-                ri.product_id, ri.quantity, user_id, conn
-            );
+        // 5. Restock and Log Inventory Changes
+        for (const auto& ri : return_items) {
+            int stock_result = flexistore::restock_product(ri.product_id, ri.quantity, user_id, conn);
             if (stock_result != FFI_SUCCESS) {
                 conn->rollback();
                 conn->setAutoCommit(true);
@@ -478,30 +317,20 @@ FLEXISTORE_EXPORT int pos_process_return(
             }
         }
 
-        // ── Step 7: COMMIT ────────────────────────────────────────────────
+        // 6. Commit Transaction
         conn->commit();
         conn->setAutoCommit(true);
 
-        // ── Step 8: Audit logging (outside transaction — non-critical) ────
+        // 7. Audit Log Transaction
         log_transaction(user_id, "POS_RETURN", return_total);
 
-        // Return the return_invoice_id as success code (always > 0)
         return return_invoice_id;
 
-    } catch (sql::SQLException& e) {
-        std::cerr << "[POS] SQLException in pos_process_return: " << e.what() << std::endl;
-        try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
-        return FFI_ERROR_DB_QUERY;
-    } catch (std::exception& e) {
-        std::cerr << "[POS] Exception in pos_process_return: " << e.what() << std::endl;
+    } catch (...) {
         try { conn->rollback(); conn->setAutoCommit(true); } catch (...) {}
         return FFI_ERROR_UNKNOWN;
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// pos_get_invoice — retrieve invoice + items as JSON
-// ═══════════════════════════════════════════════════════════════════════════════
 
 FLEXISTORE_EXPORT const char* pos_get_invoice(int invoice_id) {
     auto& pool = flexistore::DBConnectionPool::getInstance();
@@ -510,90 +339,16 @@ FLEXISTORE_EXPORT const char* pos_get_invoice(int invoice_id) {
         return flexistore::allocate_ffi_string("{\"error\":\"DB Connection Failed\"}");
     }
 
-    try {
-        sql::Connection* conn = guard.c.get();
-
-        // ── Fetch invoice header ──────────────────────────────────────────
-        unique_ptr<sql::PreparedStatement> inv_stmt(conn->prepareStatement(
-            "SELECT i.id, i.total_amount, i.net_amount, i.payment_type, "
-            "       CAST(i.created_at AS CHAR) AS created_at, "
-            "       COALESCE(c.name, 'Guest') AS client_name, "
-            "       u.name AS cashier_name "
-            "FROM invoices i "
-            "LEFT JOIN clients c ON i.client_id = c.id "
-            "JOIN users u ON i.user_id = u.id "
-            "WHERE i.id = ?"
-        ));
-        inv_stmt->setInt(1, invoice_id);
-        unique_ptr<sql::ResultSet> inv_rs(inv_stmt->executeQuery());
-
-        if (!inv_rs->next()) {
-            return flexistore::allocate_ffi_string("{\"error\":\"Invoice not found\"}");
-        }
-
-        // ── Build invoice JSON ────────────────────────────────────────────
-        flexistore::JsonBuilder builder;
-        builder.start_object();
-        builder.add_int("id", inv_rs->getInt("id"));
-        builder.add_string("client_name", inv_rs->getString("client_name"));
-        builder.add_string("cashier_name", inv_rs->getString("cashier_name"));
-
-        // Parse amounts safely from string to avoid DECIMAL heap issues
-        string total_str = inv_rs->getString("total_amount");
-        string net_str = inv_rs->getString("net_amount");
-        try {
-            builder.add_double("total_amount", std::stod(total_str));
-        } catch (...) {
-            builder.add_double("total_amount", 0.0);
-        }
-        try {
-            builder.add_double("net_amount", std::stod(net_str));
-        } catch (...) {
-            builder.add_double("net_amount", 0.0);
-        }
-
-        builder.add_string("payment_type", inv_rs->getString("payment_type"));
-        builder.add_string("created_at", inv_rs->getString("created_at"));
-
-        // ── Fetch invoice items ───────────────────────────────────────────
-        unique_ptr<sql::PreparedStatement> items_stmt(conn->prepareStatement(
-            "SELECT ii.product_id, p.name AS product_name, ii.quantity, "
-            "       CAST(ii.unit_price AS CHAR) AS unit_price "
-            "FROM invoice_items ii "
-            "JOIN products p ON ii.product_id = p.id "
-            "WHERE ii.invoice_id = ? "
-            "ORDER BY ii.id"
-        ));
-        items_stmt->setInt(1, invoice_id);
-        unique_ptr<sql::ResultSet> items_rs(items_stmt->executeQuery());
-
-        builder.start_array("items");
-        while (items_rs->next()) {
-            builder.start_object();
-            builder.add_int("product_id", items_rs->getInt("product_id"));
-            builder.add_string("product_name", items_rs->getString("product_name"));
-            builder.add_int("quantity", items_rs->getInt("quantity"));
-
-            string price_str = items_rs->getString("unit_price");
-            double price = 0.0;
-            try { price = std::stod(price_str); } catch (...) {}
-            builder.add_double("unit_price", price);
-            builder.add_double("line_total", price * items_rs->getInt("quantity"));
-
-            builder.end_object();
-        }
-        builder.end_array();
-
-        builder.end_object();
-        return flexistore::allocate_ffi_string(builder.build());
-
-    } catch (sql::SQLException& e) {
-        string err = string("{\"error\":\"") + e.what() + "\"}";
-        return flexistore::allocate_ffi_string(err);
-    } catch (std::exception& e) {
-        string err = string("{\"error\":\"") + e.what() + "\"}";
-        return flexistore::allocate_ffi_string(err);
+    InvoiceRecord record;
+    int status = flexistore::data::findInvoiceById(guard.c.get(), invoice_id, record);
+    
+    if (status == FFI_ERROR_NOT_FOUND) {
+        return flexistore::allocate_ffi_string("{\"error\":\"Invoice not found\"}");
+    } else if (status != FFI_SUCCESS) {
+        return flexistore::allocate_ffi_string("{\"error\":\"Failed to fetch invoice\"}");
     }
+
+    return flexistore::data::invoiceRecordToJson(record);
 }
 
 } // extern "C"

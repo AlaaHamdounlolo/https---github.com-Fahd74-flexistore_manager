@@ -318,7 +318,7 @@ class _ProductCard extends StatelessWidget {
                 const Spacer(),
                 // ★ Real-time remaining stock display ★
                 Text(
-                  isOutOfStock ? 'نفذ' : '$remaining متبقي',
+                  isOutOfStock ? 'Sold Out' : '$remaining left',
                   style: TextStyle(
                     color: isOutOfStock
                         ? _kRed
@@ -349,7 +349,7 @@ class _ProductCard extends StatelessWidget {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
                               content: Text(
-                                'الكمية المطلوبة غير متوفرة في المخزن',
+                                'Requested quantity not available in stock',
                               ),
                               backgroundColor: _kOrange,
                               behavior: SnackBarBehavior.floating,
@@ -385,7 +385,7 @@ class _ProductCard extends StatelessWidget {
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      isOutOfStock ? 'نفذ من المخزن' : 'أضف للسلة',
+                      isOutOfStock ? 'Out of Stock' : 'Add to Cart',
                       style: const TextStyle(
                           fontSize: 12, fontWeight: FontWeight.w600),
                     ),

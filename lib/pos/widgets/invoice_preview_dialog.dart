@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../auth/data/session_ffi.dart';
-import '../data/cart_controller.dart';
 import '../data/pos_checkout_service.dart';
-import '../data/pos_ffi.dart';
 import '../data/pos_pdf_service.dart';
 
 // ── Design Tokens ────────────────────────────────────────────────────────────
@@ -13,14 +10,13 @@ const _kBorder = Color(0xFF334155);
 const _kAccent = Color(0xFF3B82F6);
 const _kGreen = Color(0xFF22C55E);
 const _kOrange = Color(0xFFF59E0B);
-const _kRed = Color(0xFFEF4444);
 const _kTextPrimary = Colors.white;
 const _kTextSecondary = Color(0xFF94A3B8);
 
 /// Shows the invoice preview dialog after a successful checkout.
 ///
-/// The dialog displays the full invoice details and provides "Print PDF"
-/// and "Return" buttons.
+/// The dialog displays the full invoice details and provides a "Print PDF"
+/// button. The Return button has been relocated to [PosScreen] sidebar.
 Future<void> showInvoicePreviewDialog(
   BuildContext context,
   CheckoutResult result,
@@ -33,23 +29,12 @@ Future<void> showInvoicePreviewDialog(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Invoice Preview Dialog
+//  Invoice Preview Dialog (StatelessWidget — no return state needed)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-class _InvoicePreviewDialog extends StatefulWidget {
+class _InvoicePreviewDialog extends StatelessWidget {
   final CheckoutResult result;
   const _InvoicePreviewDialog({required this.result});
-
-  @override
-  State<_InvoicePreviewDialog> createState() => _InvoicePreviewDialogState();
-}
-
-class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
-  bool _returnProcessing = false;
-  bool _returnDone = false;
-  String? _returnMessage;
-
-  CheckoutResult get result => widget.result;
 
   @override
   Widget build(BuildContext context) {
@@ -80,67 +65,20 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header
                     _buildInvoiceHeader(dateStr, invoiceLabel),
                     const SizedBox(height: 16),
-
-                    // Parties row
                     _buildPartiesRow(),
                     const SizedBox(height: 16),
-
-                    // Items table header
-                    const Text('تفاصيل المنتجات',
+                    const Text('Product Details',
                         style: TextStyle(
                           color: _kTextPrimary,
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
                         )),
                     const SizedBox(height: 8),
-
-                    // Items list
                     _buildItemsList(items),
                     const SizedBox(height: 16),
-
-                    // Totals
                     _buildTotals(),
-
-                    // Return status message
-                    if (_returnMessage != null) ...[
-                      const SizedBox(height: 12),
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: _returnDone
-                              ? _kGreen.withAlpha(20)
-                              : _kRed.withAlpha(20),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: _returnDone
-                                ? _kGreen.withAlpha(60)
-                                : _kRed.withAlpha(60),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            Icon(
-                              _returnDone
-                                  ? Icons.check_circle_rounded
-                                  : Icons.error_rounded,
-                              color: _returnDone ? _kGreen : _kRed,
-                              size: 18,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(_returnMessage!,
-                                  style: TextStyle(
-                                    color: _returnDone ? _kGreen : _kRed,
-                                    fontSize: 12,
-                                  )),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -168,13 +106,13 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
           topRight: Radius.circular(16),
         ),
       ),
-      child: Row(
+      child: const Row(
         children: [
-          const Icon(Icons.check_circle_rounded, color: _kGreen, size: 24),
-          const SizedBox(width: 10),
+          Icon(Icons.check_circle_rounded, color: _kGreen, size: 24),
+          SizedBox(width: 10),
           Text(
-            _returnDone ? 'تم الإرجاع بنجاح!' : 'تمت العملية بنجاح!',
-            style: const TextStyle(
+            'Transaction Completed!',
+            style: TextStyle(
               color: _kGreen,
               fontSize: 16,
               fontWeight: FontWeight.bold,
@@ -244,7 +182,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
         Expanded(
           child: _infoCard(
             icon: Icons.badge_rounded,
-            label: 'الكاشير',
+            label: 'Cashier',
             value: result.cashierName ?? 'N/A',
           ),
         ),
@@ -252,7 +190,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
         Expanded(
           child: _infoCard(
             icon: Icons.person_rounded,
-            label: 'العميل',
+            label: 'Client',
             value: clientName,
           ),
         ),
@@ -260,8 +198,8 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
         Expanded(
           child: _infoCard(
             icon: Icons.payment_rounded,
-            label: 'الدفع',
-            value: result.paymentMethod ?? 'كاش',
+            label: 'Payment',
+            value: result.paymentMethod ?? 'Cash',
           ),
         ),
       ],
@@ -334,14 +272,14 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
                             fontSize: 11,
                             fontWeight: FontWeight.w600))),
                 Expanded(
-                    child: Text('المنتج',
+                    child: Text('Product',
                         style: TextStyle(
                             color: _kTextSecondary,
                             fontSize: 11,
                             fontWeight: FontWeight.w600))),
                 SizedBox(
                     width: 40,
-                    child: Text('الكمية',
+                    child: Text('Qty',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                             color: _kTextSecondary,
@@ -349,7 +287,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
                             fontWeight: FontWeight.w600))),
                 SizedBox(
                     width: 70,
-                    child: Text('السعر',
+                    child: Text('Price',
                         textAlign: TextAlign.right,
                         style: TextStyle(
                             color: _kTextSecondary,
@@ -357,7 +295,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
                             fontWeight: FontWeight.w600))),
                 SizedBox(
                     width: 70,
-                    child: Text('الإجمالي',
+                    child: Text('Total',
                         textAlign: TextAlign.right,
                         style: TextStyle(
                             color: _kTextSecondary,
@@ -440,17 +378,17 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
       ),
       child: Column(
         children: [
-          _totalLine('المجموع الفرعي', '\$${subtotal.toStringAsFixed(2)}'),
+          _totalLine('Subtotal', '\$${subtotal.toStringAsFixed(2)}'),
           if (discount > 0) ...[
             const SizedBox(height: 6),
             _totalLine(
-                'الخصم', '-\$${discount.toStringAsFixed(2)}',
+                'Discount', '-\$${discount.toStringAsFixed(2)}',
                 valueColor: _kOrange),
           ],
           const SizedBox(height: 8),
           const Divider(color: _kBorder, height: 1),
           const SizedBox(height: 8),
-          _totalLine('الإجمالي الكلي', '\$${total.toStringAsFixed(2)}',
+          _totalLine('Grand Total', '\$${total.toStringAsFixed(2)}',
               isBold: true, valueColor: _kGreen, size: 16),
         ],
       ),
@@ -481,8 +419,6 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
   // ── Footer Actions ──────────────────────────────────────────────────────────
 
   Widget _buildFooterActions(BuildContext context) {
-    final hasInvoice = result.invoiceId != null && result.invoiceId! > 0;
-
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Row(
@@ -492,7 +428,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
             child: OutlinedButton.icon(
               onPressed: () => Navigator.pop(context),
               icon: const Icon(Icons.close_rounded, size: 18),
-              label: const Text('إغلاق', style: TextStyle(fontSize: 13)),
+              label: const Text('Close', style: TextStyle(fontSize: 13)),
               style: OutlinedButton.styleFrom(
                 foregroundColor: _kTextSecondary,
                 side: const BorderSide(color: _kBorder),
@@ -503,35 +439,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
               ),
             ),
           ),
-          const SizedBox(width: 8),
-
-          // Return Button
-          if (hasInvoice && !_returnDone)
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: _returnProcessing ? null : _handleReturn,
-                icon: _returnProcessing
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: _kOrange))
-                    : const Icon(Icons.assignment_return_rounded, size: 18),
-                label: Text(
-                  _returnProcessing ? 'جاري...' : 'إرجاع',
-                  style: const TextStyle(fontSize: 13),
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: _kOrange,
-                  side: const BorderSide(color: _kOrange),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-              ),
-            ),
-          if (hasInvoice && !_returnDone) const SizedBox(width: 8),
+          const SizedBox(width: 12),
 
           // Print PDF
           Expanded(
@@ -539,7 +447,7 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
             child: ElevatedButton.icon(
               onPressed: () => PosPdfService.printInvoice(result),
               icon: const Icon(Icons.print_rounded, size: 18),
-              label: const Text('طباعة PDF',
+              label: const Text('Print PDF',
                   style:
                       TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
               style: ElevatedButton.styleFrom(
@@ -556,90 +464,6 @@ class _InvoicePreviewDialogState extends State<_InvoicePreviewDialog> {
         ],
       ),
     );
-  }
-
-  // ── Return Handler ──────────────────────────────────────────────────────────
-
-  void _handleReturn() {
-    // Confirm dialog
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: _kSurface,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: const Text('تأكيد الإرجاع',
-            style: TextStyle(color: _kTextPrimary, fontSize: 16)),
-        content: Text(
-          'هل أنت متأكد من إرجاع جميع منتجات الفاتورة INV-${result.invoiceId}؟\n'
-          'سيتم إضافة الكميات مرة أخرى للمخزن.',
-          style: const TextStyle(color: _kTextSecondary, fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('إلغاء',
-                style: TextStyle(color: _kTextSecondary)),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _executeReturn();
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _kOrange,
-              foregroundColor: Colors.white,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-              ),
-            ),
-            child: const Text('تأكيد الإرجاع'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _executeReturn() {
-    setState(() {
-      _returnProcessing = true;
-      _returnMessage = null;
-    });
-
-    final userId = SessionNativeAPI.instance.getCurrentUserId();
-    final returnInvoiceId = PosFFI.instance.processReturn(
-      userId: userId,
-      originalInvoiceId: result.invoiceId!,
-    );
-
-    if (returnInvoiceId > 0) {
-      // Refresh product stock in the POS screen
-      CartController.instance.loadProducts();
-
-      setState(() {
-        _returnProcessing = false;
-        _returnDone = true;
-        _returnMessage = 'تم الإرجاع بنجاح — فاتورة الإرجاع: INV-$returnInvoiceId';
-      });
-    } else {
-      setState(() {
-        _returnProcessing = false;
-        _returnMessage = _returnErrorMessage(returnInvoiceId);
-      });
-    }
-  }
-
-  String _returnErrorMessage(int code) {
-    switch (code) {
-      case -600:
-        return 'الفاتورة الأصلية غير موجودة';
-      case -601:
-        return 'تم إرجاع هذه الفاتورة مسبقاً';
-      case -602:
-        return 'كمية الإرجاع تتجاوز الكمية الأصلية';
-      default:
-        return 'حدث خطأ أثناء الإرجاع (Code: $code)';
-    }
   }
 
   // ── Utils ───────────────────────────────────────────────────────────────────

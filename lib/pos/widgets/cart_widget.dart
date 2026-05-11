@@ -133,12 +133,12 @@ class _CartWidgetState extends State<CartWidget> {
                     color: _kTextSecondary.withAlpha(60), size: 56),
                 const SizedBox(height: 10),
                 const Text(
-                  'السلة فارغة',
+                  'Cart is empty',
                   style: TextStyle(color: _kTextSecondary, fontSize: 14),
                 ),
                 const SizedBox(height: 4),
                 const Text(
-                  'أضف منتجات من القائمة',
+                  'Add products from the list',
                   style: TextStyle(color: _kTextSecondary, fontSize: 12),
                 ),
               ],
@@ -195,7 +195,7 @@ class _CartWidgetState extends State<CartWidget> {
                             style: const TextStyle(
                                 color: _kTextPrimary, fontSize: 13),
                             decoration: const InputDecoration(
-                              hintText: 'قيمة الخصم…',
+                              hintText: 'Discount Value…',
                               hintStyle: TextStyle(
                                   color: _kTextSecondary, fontSize: 13),
                               border: InputBorder.none,
@@ -257,7 +257,7 @@ class _CartWidgetState extends State<CartWidget> {
                           Icon(Icons.point_of_sale_rounded, size: 20),
                           SizedBox(width: 10),
                           Text(
-                            'إتمام البيع',
+                            'Confirm Purchase',
                             style: TextStyle(
                                 fontSize: 15, fontWeight: FontWeight.bold),
                           ),
@@ -385,7 +385,7 @@ class _CartItemRow extends StatelessWidget {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
                           content: Text(
-                            'الكمية المطلوبة غير متوفرة في المخزن',
+                            'Requested quantity not available in stock',
                           ),
                           backgroundColor: _kOrange,
                           behavior: SnackBarBehavior.floating,

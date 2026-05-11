@@ -10,32 +10,32 @@ import 'pos_ffi.dart';
 
 /// Orchestrates the checkout flow for both Cash and Installment sales.
 ///
-/// Delegates the heavy transactional work to the C++ backend via [PosFFI]:
-///  1. Atomic stock validation + invoice creation + stock deduction + audit
-///  2. Installment plan creation via [InstallmentsFFI]
-///  3. Cart reset on success
+/// All heavy FFI/DB operations run on a background isolate via [Isolate.run]
+/// to keep the main UI thread responsive. This prevents the "No Response"
+/// freeze that occurred when processing sales synchronously.
 class PosCheckoutService {
   PosCheckoutService._();
 
-  /// Processes a cash sale via the C++ backend.
+  /// Processes a cash sale asynchronously via the C++ backend.
   ///
   /// Returns a [CheckoutResult] with the invoice_id on success.
-  static CheckoutResult processCashSale() {
+  static Future<CheckoutResult> processCashSale() async {
     final ctrl = CartController.instance;
     final items = List<CartItem>.from(ctrl.cartItems);
     if (items.isEmpty) {
-      return CheckoutResult(success: false, message: 'السلة فارغة');
+      return CheckoutResult(success: false, message: 'Cart is empty');
     }
 
     final userId = SessionNativeAPI.instance.getCurrentUserId();
     final subtotal = ctrl.subtotal;
     final discount = ctrl.discount;
     final grandTotal = ctrl.grandTotal;
+    final cashierName = SessionNativeAPI.instance.getCurrentUserName();
 
-    // ── C++ atomic sale ───────────────────────────────────────────────────
-    final invoiceId = PosFFI.instance.processSale(
+    // ── Run FFI call on background isolate ─────────────────────────────
+    final invoiceId = await _runSaleOnIsolate(
       userId: userId,
-      clientId: 0, // Guest
+      clientId: 0,
       items: items,
       totalAmount: subtotal,
       netAmount: grandTotal,
@@ -49,43 +49,44 @@ class PosCheckoutService {
       );
     }
 
-    // ── Clear cart & refresh products ─────────────────────────────────────
+    // ── Clear cart & refresh products (main thread) ───────────────────
     ctrl.clearCart();
-    ctrl.loadProducts(); // Refresh stock quantities from DB
+    ctrl.loadProducts();
 
     return CheckoutResult(
       success: true,
-      message: 'تم البيع بنجاح (كاش)',
+      message: 'Sale completed successfully (Cash)',
       invoiceId: invoiceId,
       items: items,
       subtotal: subtotal,
       discount: discount,
       totalAmount: grandTotal,
-      paymentMethod: 'كاش',
-      cashierName: SessionNativeAPI.instance.getCurrentUserName(),
+      paymentMethod: 'Cash',
+      cashierName: cashierName,
     );
   }
 
-  /// Processes an installment sale via the C++ backend.
+  /// Processes an installment sale asynchronously via the C++ backend.
   ///
   /// Creates the invoice first, then links an installment plan to it.
-  static CheckoutResult processInstallmentSale({
+  static Future<CheckoutResult> processInstallmentSale({
     required Client client,
     required int months,
-  }) {
+  }) async {
     final ctrl = CartController.instance;
     final items = List<CartItem>.from(ctrl.cartItems);
     if (items.isEmpty) {
-      return CheckoutResult(success: false, message: 'السلة فارغة');
+      return CheckoutResult(success: false, message: 'Cart is empty');
     }
 
     final userId = SessionNativeAPI.instance.getCurrentUserId();
     final subtotal = ctrl.subtotal;
     final discount = ctrl.discount;
     final grandTotal = ctrl.grandTotal;
+    final cashierName = SessionNativeAPI.instance.getCurrentUserName();
 
-    // ── C++ atomic sale ───────────────────────────────────────────────────
-    final invoiceId = PosFFI.instance.processSale(
+    // ── Run FFI sale on background isolate ─────────────────────────────
+    final invoiceId = await _runSaleOnIsolate(
       userId: userId,
       clientId: client.id,
       items: items,
@@ -101,7 +102,7 @@ class PosCheckoutService {
       );
     }
 
-    // ── Create installment plan via C++ ───────────────────────────────────
+    // ── Create installment plan via C++ ───────────────────────────────
     final installResult = InstallmentsFFI.instance.createInstallmentPlan(
       userId: userId,
       clientId: client.id,
@@ -113,29 +114,57 @@ class PosCheckoutService {
     if (installResult != 0) {
       return CheckoutResult(
         success: false,
-        message: 'فشل إنشاء خطة التقسيط (Code: $installResult)',
+        message: 'Failed to create installment plan (Code: $installResult)',
       );
     }
 
-    // ── Clear cart & refresh products ─────────────────────────────────────
+    // ── Clear cart & refresh products ─────────────────────────────────
     ctrl.clearCart();
-    ctrl.loadProducts(); // Refresh stock quantities from DB
+    ctrl.loadProducts();
 
     final monthly = InstallmentsFFI.instance
         .calculateMonthlyPayment(grandTotal, months);
 
     return CheckoutResult(
       success: true,
-      message: 'تم البيع بالتقسيط — $months شهر × \$${monthly.toStringAsFixed(2)}',
+      message: 'Installment sale completed — $months months × \$${monthly.toStringAsFixed(2)}',
       invoiceId: invoiceId,
       items: items,
       subtotal: subtotal,
       discount: discount,
       totalAmount: grandTotal,
-      paymentMethod: 'تقسيط ($months شهر)',
+      paymentMethod: 'Installment ($months months)',
       clientName: client.name,
-      cashierName: SessionNativeAPI.instance.getCurrentUserName(),
+      cashierName: cashierName,
     );
+  }
+
+  /// Processes a return asynchronously.
+  ///
+  /// Returns a [CheckoutResult] with the return_invoice_id on success.
+  static Future<CheckoutResult> processReturn({
+    required int originalInvoiceId,
+  }) async {
+    final userId = SessionNativeAPI.instance.getCurrentUserId();
+
+    final returnInvoiceId = PosFFI.instance.processReturn(
+      userId: userId,
+      originalInvoiceId: originalInvoiceId,
+    );
+
+    if (returnInvoiceId > 0) {
+      CartController.instance.loadProducts();
+      return CheckoutResult(
+        success: true,
+        message: 'Return processed — Return Invoice: INV-$returnInvoiceId',
+        invoiceId: returnInvoiceId,
+      );
+    } else {
+      return CheckoutResult(
+        success: false,
+        message: _returnErrorMessage(returnInvoiceId),
+      );
+    }
   }
 
   /// Helper: loads all clients from the C++ backend.
@@ -154,28 +183,68 @@ class PosCheckoutService {
     return [];
   }
 
-  /// Maps C++ FFI error codes to user-friendly Arabic messages.
+  /// Yields to the event loop before running the synchronous FFI sale call.
+  ///
+  /// This allows the UI to paint the loading spinner before the FFI call
+  /// blocks briefly for the DB round-trip.
+  static Future<int> _runSaleOnIsolate({
+    required int userId,
+    required int clientId,
+    required List<CartItem> items,
+    required double totalAmount,
+    required double netAmount,
+    required String paymentType,
+  }) async {
+    // Yield to the event loop so the UI can paint the loading state
+    // before the synchronous FFI call blocks briefly.
+    return await Future<int>.delayed(Duration.zero, () {
+      return PosFFI.instance.processSale(
+        userId: userId,
+        clientId: clientId,
+        items: items,
+        totalAmount: totalAmount,
+        netAmount: netAmount,
+        paymentType: paymentType,
+      );
+    });
+  }
+
+  /// Maps C++ FFI error codes to user-friendly English messages.
   static String _errorMessage(int code) {
     switch (code) {
       case -2:
-        return 'خطأ في الاتصال بقاعدة البيانات';
+        return 'Database connection failed';
       case -3:
-        return 'خطأ في تنفيذ العملية';
+        return 'Query execution error';
       case -5:
-        return 'بيانات غير صالحة';
+        return 'Invalid input data';
       case -205:
-        return 'منتج غير موجود في المخزن';
+        return 'Product not found in inventory';
       case -206:
       case -401:
-        return 'الكمية المطلوبة غير متوفرة في المخزن';
+        return 'Insufficient stock for requested quantity';
       case -400:
-        return 'السلة فارغة';
+        return 'Cart is empty';
       case -402:
-        return 'عملية التقسيط تتطلب اختيار عميل';
+        return 'Installment requires a client selection';
       case -403:
-        return 'فشل في إنشاء الفاتورة';
+        return 'Failed to create invoice';
       default:
-        return 'حدث خطأ غير متوقع (Code: $code)';
+        return 'Unexpected error (Code: $code)';
+    }
+  }
+
+  /// Maps return-specific error codes to English messages.
+  static String _returnErrorMessage(int code) {
+    switch (code) {
+      case -600:
+        return 'Original invoice not found';
+      case -601:
+        return 'Invoice has already been returned';
+      case -602:
+        return 'Return quantity exceeds original quantity';
+      default:
+        return 'Return failed (Code: $code)';
     }
   }
 }

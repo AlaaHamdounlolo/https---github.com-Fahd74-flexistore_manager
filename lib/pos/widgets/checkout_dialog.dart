@@ -44,6 +44,7 @@ enum _PaymentType { cash, installment }
 
 class _CheckoutDialogState extends State<_CheckoutDialog> {
   _PaymentType _paymentType = _PaymentType.cash;
+  bool _isProcessing = false;
 
   // ── Installment-specific state ──
   List<Client> _clients = [];
@@ -143,7 +144,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           const Icon(Icons.point_of_sale_rounded, color: _kAccent, size: 22),
           const SizedBox(width: 10),
           const Text(
-            'إتمام عملية البيع',
+            'Complete Sale',
             style: TextStyle(
               color: _kTextPrimary,
               fontSize: 18,
@@ -153,7 +154,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           const Spacer(),
           IconButton(
             icon: const Icon(Icons.close_rounded, color: _kTextSecondary),
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: _isProcessing ? null : () => Navigator.pop(context, false),
           ),
         ],
       ),
@@ -172,16 +173,16 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
       ),
       child: Column(
         children: [
-          _summaryRow('المنتجات', '${ctrl.cartItems.length} صنف'),
+          _summaryRow('Products', '${ctrl.cartItems.length} items'),
           const SizedBox(height: 6),
           _summaryRow(
-            'المجموع الفرعي',
+            'Subtotal',
             '\$${ctrl.subtotal.toStringAsFixed(2)}',
           ),
           if (ctrl.discount > 0) ...[
             const SizedBox(height: 6),
             _summaryRow(
-              'الخصم',
+              'Discount',
               '-\$${ctrl.discount.toStringAsFixed(2)}',
               valueColor: _kOrange,
             ),
@@ -190,7 +191,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           const Divider(color: _kBorder, height: 1),
           const SizedBox(height: 8),
           _summaryRow(
-            'الإجمالي',
+            'Grand Total',
             '\$${ctrl.grandTotal.toStringAsFixed(2)}',
             isBold: true,
             valueColor: _kGreen,
@@ -227,7 +228,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('طريقة الدفع',
+        const Text('Payment Method',
             style: TextStyle(
               color: _kTextPrimary,
               fontSize: 14,
@@ -238,7 +239,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           children: [
             Expanded(
               child: _paymentOption(
-                label: 'كاش',
+                label: 'Cash',
                 icon: Icons.payments_rounded,
                 isSelected: _paymentType == _PaymentType.cash,
                 onTap: () => setState(() => _paymentType = _PaymentType.cash),
@@ -247,7 +248,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
             const SizedBox(width: 12),
             Expanded(
               child: _paymentOption(
-                label: 'تقسيط',
+                label: 'Installment',
                 icon: Icons.calendar_month_rounded,
                 isSelected: _paymentType == _PaymentType.installment,
                 onTap: () =>
@@ -305,7 +306,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Client Search / Selection
-        const Text('اختر العميل',
+        const Text('Select Client',
             style: TextStyle(
               color: _kTextPrimary,
               fontSize: 14,
@@ -332,7 +333,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                   style:
                       const TextStyle(color: _kTextPrimary, fontSize: 13),
                   decoration: const InputDecoration(
-                    hintText: 'بحث بالاسم أو رقم الهاتف…',
+                    hintText: 'Search by name or phone…',
                     hintStyle:
                         TextStyle(color: _kTextSecondary, fontSize: 13),
                     border: InputBorder.none,
@@ -360,7 +361,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                       Icon(Icons.person_add_rounded,
                           color: _kGreen, size: 14),
                       SizedBox(width: 4),
-                      Text('عميل جديد',
+                      Text('New Client',
                           style: TextStyle(
                             color: _kGreen,
                             fontSize: 11,
@@ -381,7 +382,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
         const SizedBox(height: 16),
 
         // Months selector
-        const Text('عدد الأشهر',
+        const Text('Number of Months',
             style: TextStyle(
               color: _kTextPrimary,
               fontSize: 14,
@@ -404,14 +405,14 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('القسط الشهري',
+              const Text('Monthly Payment',
                   style: TextStyle(
                     color: _kAccent,
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
                   )),
               Text(
-                '\$${_monthlyPayment.toStringAsFixed(2)} / شهر',
+                '\$${_monthlyPayment.toStringAsFixed(2)} / month',
                 style: const TextStyle(
                   color: _kAccent,
                   fontSize: 15,
@@ -443,7 +444,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           borderRadius: BorderRadius.circular(8),
         ),
         child: const Center(
-          child: Text('لا يوجد عملاء',
+          child: Text('No clients found',
               style: TextStyle(color: _kTextSecondary, fontSize: 12)),
         ),
       );
@@ -546,7 +547,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                 ),
                 child: Center(
                   child: Text(
-                    '$m شهر',
+                    '$m mo',
                     style: TextStyle(
                       color: isSelected ? _kAccent : _kTextSecondary,
                       fontWeight:
@@ -566,8 +567,10 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
   // ── Footer Buttons ──────────────────────────────────────────────────────────
 
   Widget _buildFooter() {
-    final canComplete = _paymentType == _PaymentType.cash ||
-        (_paymentType == _PaymentType.installment && _selectedClient != null);
+    final canComplete = !_isProcessing &&
+        (_paymentType == _PaymentType.cash ||
+            (_paymentType == _PaymentType.installment &&
+                _selectedClient != null));
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -576,7 +579,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
           // Cancel
           Expanded(
             child: OutlinedButton(
-              onPressed: () => Navigator.pop(context, false),
+              onPressed: _isProcessing ? null : () => Navigator.pop(context, false),
               style: OutlinedButton.styleFrom(
                 foregroundColor: _kTextSecondary,
                 side: const BorderSide(color: _kBorder),
@@ -585,7 +588,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                 ),
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-              child: const Text('إلغاء', style: TextStyle(fontSize: 14)),
+              child: const Text('Cancel', style: TextStyle(fontSize: 14)),
             ),
           ),
           const SizedBox(width: 12),
@@ -606,20 +609,27 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                 ),
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.check_circle_rounded, size: 18),
-                  const SizedBox(width: 8),
-                  Text(
-                    _paymentType == _PaymentType.cash
-                        ? 'تأكيد البيع (كاش)'
-                        : 'تأكيد التقسيط',
-                    style: const TextStyle(
-                        fontSize: 14, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
+              child: _isProcessing
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                    )
+                  : Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.check_circle_rounded, size: 18),
+                        const SizedBox(width: 8),
+                        Text(
+                          _paymentType == _PaymentType.cash
+                              ? 'Confirm Purchase (Cash)'
+                              : 'Confirm Installment',
+                          style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.bold),
+                        ),
+                      ],
+                    ),
             ),
           ),
         ],
@@ -629,17 +639,23 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
 
   // ── Actions ─────────────────────────────────────────────────────────────────
 
-  void _handleCheckout() async {
+  Future<void> _handleCheckout() async {
+    setState(() => _isProcessing = true);
+
     CheckoutResult result;
 
     if (_paymentType == _PaymentType.cash) {
-      result = PosCheckoutService.processCashSale();
+      result = await PosCheckoutService.processCashSale();
     } else {
-      result = PosCheckoutService.processInstallmentSale(
+      result = await PosCheckoutService.processInstallmentSale(
         client: _selectedClient!,
         months: _selectedMonths,
       );
     }
+
+    if (!mounted) return;
+
+    setState(() => _isProcessing = false);
 
     if (!result.success) {
       // Show error SnackBar and stay on checkout dialog
@@ -682,7 +698,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                 children: [
                   Icon(Icons.person_add_rounded, color: _kGreen, size: 20),
                   SizedBox(width: 8),
-                  Text('إضافة عميل جديد',
+                  Text('Add New Client',
                       style: TextStyle(
                         color: _kTextPrimary,
                         fontSize: 16,
@@ -691,11 +707,11 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                 ],
               ),
               const SizedBox(height: 16),
-              _inputField(controller: nameCtrl, hint: 'اسم العميل'),
+              _inputField(controller: nameCtrl, hint: 'Client Name'),
               const SizedBox(height: 10),
               _inputField(
                 controller: phoneCtrl,
-                hint: 'رقم الهاتف',
+                hint: 'Phone Number',
                 keyboardType: TextInputType.phone,
               ),
               const SizedBox(height: 16),
@@ -711,7 +727,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                           borderRadius: BorderRadius.circular(8),
                         ),
                       ),
-                      child: const Text('إلغاء'),
+                      child: const Text('Cancel'),
                     ),
                   ),
                   const SizedBox(width: 10),
@@ -724,7 +740,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                         if (name.isEmpty || phone.isEmpty) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                              content: Text('يرجى إدخال الاسم ورقم الهاتف'),
+                              content: Text('Please enter name and phone'),
                               backgroundColor: _kRed,
                               behavior: SnackBarBehavior.floating,
                             ),
@@ -753,7 +769,7 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
                           borderRadius: BorderRadius.circular(8),
                         ),
                       ),
-                      child: const Text('إضافة'),
+                      child: const Text('Add'),
                     ),
                   ),
                 ],
